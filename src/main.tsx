@@ -1,8 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import "./index.css";
-import App from "./App";
+import WorldclassApp from "./worldclass/App";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Application root was not found");
-createRoot(root).render(<StrictMode><App /></StrictMode>);
+createRoot(root).render(<StrictMode><WorldclassApp /></StrictMode>);
