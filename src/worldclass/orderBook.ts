@@ -10,6 +10,7 @@ export interface BinanceDepthUpdate {
   E: number;
   U: number;
   u: number;
+  pu?: number;
   b: Array<[string, string]>;
   a: Array<[string, string]>;
 }
@@ -22,6 +23,7 @@ export class BinanceLocalBook {
   private buffered: BinanceDepthUpdate[] = [];
   private lastUpdateId = 0;
   private state: BookSyncState = "idle";
+  private needsBridge = true;
 
   get syncState(): BookSyncState { return this.state; }
   get sequence(): number { return this.lastUpdateId; }
@@ -32,6 +34,7 @@ export class BinanceLocalBook {
     this.buffered = [];
     this.lastUpdateId = 0;
     this.state = "buffering";
+    this.needsBridge = true;
   }
 
   buffer(update: BinanceDepthUpdate): void {
@@ -47,6 +50,7 @@ export class BinanceLocalBook {
     this.applyLevels(this.bids, snapshot.bids);
     this.applyLevels(this.asks, snapshot.asks);
     this.lastUpdateId = snapshot.lastUpdateId;
+    this.needsBridge = true;
     this.buffered.sort((a, b) => a.U - b.U);
     this.buffered = this.buffered.filter((update) => update.u > this.lastUpdateId);
 
@@ -63,7 +67,12 @@ export class BinanceLocalBook {
 
   applyUpdate(update: BinanceDepthUpdate): boolean {
     if (update.u <= this.lastUpdateId) return false;
-    if (this.lastUpdateId > 0 && update.U > this.lastUpdateId + 1) {
+    const bridgesSnapshot = this.needsBridge && this.lastUpdateId > 0 && update.U <= this.lastUpdateId + 1 && update.u >= this.lastUpdateId + 1;
+    if (!bridgesSnapshot && this.lastUpdateId > 0 && update.pu !== undefined && update.pu !== this.lastUpdateId) {
+      this.state = "gapped";
+      throw new Error(`Futures depth sequence gap: expected previous ${this.lastUpdateId}, received ${update.pu}`);
+    }
+    if (!bridgesSnapshot && this.lastUpdateId > 0 && update.U > this.lastUpdateId + 1) {
       this.state = "gapped";
       throw new Error(`Depth sequence gap: expected ${this.lastUpdateId + 1}, received ${update.U}`);
     }
@@ -71,6 +80,7 @@ export class BinanceLocalBook {
     this.applyLevels(this.bids, update.b);
     this.applyLevels(this.asks, update.a);
     this.lastUpdateId = update.u;
+    this.needsBridge = false;
     this.state = "synced";
     return true;
   }
