@@ -4,18 +4,42 @@ export const MARKETS: Record<MarketKey, MarketDefinition> = {
   BTC: {
     key: "BTC",
     displayName: "BTC / USDT Spot",
-    shortName: "BTCUSDT",
+    shortName: "BTCUSDT SPOT",
     provider: "Binance",
     providerSymbol: "BTCUSDT",
     productType: "spot",
+    binanceProduct: "spot",
     venue: "Binance Spot",
     priceDecimals: 1,
     quantityDecimals: 5,
     tickSize: 0.1,
     quantityUnit: "BTC",
     timezone: "UTC",
-    disclosure: "Binance BTCUSDT spot. This is spot-market order flow, not CME Bitcoin futures.",
+    disclosure: "Binance BTCUSDT spot. Footprints use aggressor-classified aggregate trades and synchronized spot depth.",
     quality: "full",
+    footprintDefaultTicks: 10,
+    footprintImbalanceRatio: 3,
+    footprintMinVolume: 0.05,
+  },
+  BTCPERP: {
+    key: "BTCPERP",
+    displayName: "BTC / USDT Perpetual",
+    shortName: "BTCUSDT PERP",
+    provider: "Binance",
+    providerSymbol: "BTCUSDT",
+    productType: "perpetual",
+    binanceProduct: "usdm",
+    venue: "Binance USDⓈ-M",
+    priceDecimals: 1,
+    quantityDecimals: 3,
+    tickSize: 0.1,
+    quantityUnit: "BTC",
+    timezone: "UTC",
+    disclosure: "Binance BTCUSDT USDⓈ-M perpetual. This is crypto perpetual order flow, not CME Bitcoin futures.",
+    quality: "full",
+    footprintDefaultTicks: 10,
+    footprintImbalanceRatio: 3,
+    footprintMinVolume: 0.05,
   },
   NQ: {
     key: "NQ",
@@ -32,6 +56,9 @@ export const MARKETS: Record<MarketKey, MarketDefinition> = {
     timezone: "UTC",
     disclosure: "Hyperliquid XYZ100 perpetual proxy. It is not CME Nasdaq-100 futures and must not be interpreted as CME NQ order flow.",
     quality: "proxy",
+    footprintDefaultTicks: 5,
+    footprintImbalanceRatio: 3,
+    footprintMinVolume: 0.5,
   },
   ES: {
     key: "ES",
@@ -48,6 +75,9 @@ export const MARKETS: Record<MarketKey, MarketDefinition> = {
     timezone: "UTC",
     disclosure: "Hyperliquid SP500 perpetual proxy. It is not CME E-mini S&P 500 futures and must not be interpreted as CME ES order flow.",
     quality: "proxy",
+    footprintDefaultTicks: 10,
+    footprintImbalanceRatio: 3,
+    footprintMinVolume: 0.5,
   },
 };
 
@@ -59,6 +89,11 @@ export function timeframeMs(timeframe: Timeframe): number {
   if (unit === "m") return count * 60_000;
   if (unit === "h") return count * 3_600_000;
   return count * 86_400_000;
+}
+
+export function candleStart(timestamp: number, timeframe: Timeframe): number {
+  const interval = timeframeMs(timeframe);
+  return Math.floor(timestamp / interval) * interval;
 }
 
 export function sessionStartUtc(timestamp: number): number {
