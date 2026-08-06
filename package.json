@@ -1,13 +1,13 @@
 {
   "name": "veilflow-orderflow",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "build": "npm run typecheck && npm test && vite build",
     "test:watch": "vitest",
     "preview": "vite preview"
   },
