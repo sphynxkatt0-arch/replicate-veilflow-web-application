@@ -1,12 +1,14 @@
-export type MarketKey = "BTC" | "NQ" | "ES";
+export type MarketKey = "BTC" | "BTCPERP" | "NQ" | "ES";
 export type ProviderName = "Binance" | "Hyperliquid";
-export type ProductType = "spot" | "perpetual-proxy";
+export type ProductType = "spot" | "perpetual" | "perpetual-proxy";
+export type BinanceProduct = "spot" | "usdm";
 export type Timeframe = "1m" | "3m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
 export type Side = "buy" | "sell";
 export type ConnectionState = "connecting" | "syncing" | "live" | "reconnecting" | "stale" | "error" | "closed";
 export type DataQuality = "full" | "live-only" | "aggregate" | "proxy" | "stale" | "gapped" | "unavailable";
 export type ChartMode = "candles" | "footprint" | "delta";
 export type ReplayMode = "live" | "events";
+export type FootprintQuality = "full" | "live-partial" | "aggregate-only" | "gapped" | "replay-full";
 
 export interface MarketDefinition {
   key: MarketKey;
@@ -15,6 +17,7 @@ export interface MarketDefinition {
   provider: ProviderName;
   providerSymbol: string;
   productType: ProductType;
+  binanceProduct?: BinanceProduct;
   venue: string;
   priceDecimals: number;
   quantityDecimals: number;
@@ -23,6 +26,9 @@ export interface MarketDefinition {
   timezone: string;
   disclosure: string;
   quality: DataQuality;
+  footprintDefaultTicks: number;
+  footprintImbalanceRatio: number;
+  footprintMinVolume: number;
 }
 
 export interface Candle {
@@ -46,6 +52,54 @@ export interface Trade {
   size: number;
   side: Side;
   notional: number;
+  sequence?: number;
+  source?: "backfill" | "live" | "replay";
+}
+
+export interface FootprintRow {
+  price: number;
+  bidVolume: number;
+  askVolume: number;
+  totalVolume: number;
+  delta: number;
+  tradeCount: number;
+  bidTrades: number;
+  askTrades: number;
+  bidImbalance: boolean;
+  askImbalance: boolean;
+  stackedBid: boolean;
+  stackedAsk: boolean;
+  inValueArea: boolean;
+}
+
+export interface FootprintCandle {
+  time: number;
+  endTime: number;
+  rows: FootprintRow[];
+  totalBidVolume: number;
+  totalAskVolume: number;
+  totalVolume: number;
+  delta: number;
+  maxDelta: number;
+  minDelta: number;
+  tradeCount: number;
+  pocPrice?: number;
+  valueAreaHigh?: number;
+  valueAreaLow?: number;
+  coverageRatio?: number;
+  quality: FootprintQuality;
+  priceStep: number;
+}
+
+export interface FootprintCoverage {
+  quality: FootprintQuality;
+  source: "binance-aggtrades" | "live-stream" | "hyperliquid-live" | "replay" | "none";
+  startTime?: number;
+  endTime?: number;
+  contiguous: boolean;
+  eventCount: number;
+  gappedAt?: number;
+  detail: string;
 }
 
 export interface BookLevel {
@@ -99,6 +153,8 @@ export interface MarketState {
   timeframe: Timeframe;
   candles: Candle[];
   trades: Trade[];
+  footprints: FootprintCandle[];
+  footprintCoverage: FootprintCoverage;
   book: OrderBook | null;
   metrics: MarketMetrics;
   analytics: AnalyticsSnapshot;

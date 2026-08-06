@@ -16,26 +16,20 @@ export function sessionVwap(candles: Candle[], now = Date.now()): number | undef
 
 export function sessionCvd(candles: Candle[], trades: Trade[], now = Date.now()): { value?: number; quality: DataQuality } {
   const start = sessionStartUtc(now);
-  let value = 0;
-  let historicalComplete = true;
-  let used = false;
-  for (const candle of candles) {
-    if (candle.time < start || candle.time > now) continue;
-    if (candle.buyVolume === undefined || candle.sellVolume === undefined) {
-      historicalComplete = false;
-      continue;
-    }
-    value += candle.buyVolume - candle.sellVolume;
-    used = true;
+  const sessionCandles = candles.filter((candle) => candle.time >= start && candle.time <= now);
+  const historicalComplete = sessionCandles.length > 0 && sessionCandles.every((candle) => candle.buyVolume !== undefined && candle.sellVolume !== undefined);
+  if (historicalComplete) {
+    return {
+      value: sessionCandles.reduce((sum, candle) => sum + (candle.buyVolume ?? 0) - (candle.sellVolume ?? 0), 0),
+      quality: "full",
+    };
   }
-  if (!historicalComplete) {
-    for (const trade of trades) {
-      if (trade.exchangeTime < start || trade.exchangeTime > now) continue;
-      value += trade.side === "buy" ? trade.size : -trade.size;
-      used = true;
-    }
-  }
-  return { value: used ? value : undefined, quality: historicalComplete ? "full" : "live-only" };
+  const sessionTrades = trades.filter((trade) => trade.exchangeTime >= start && trade.exchangeTime <= now);
+  if (!sessionTrades.length) return { quality: "live-only" };
+  return {
+    value: sessionTrades.reduce((sum, trade) => sum + (trade.side === "buy" ? trade.size : -trade.size), 0),
+    quality: "live-only",
+  };
 }
 
 export function rollingDelta(candles: Candle[], bars = 200): number | undefined {
@@ -92,7 +86,7 @@ export function detectLargeTrades(
   percentile = 0.985,
   burstWindowMs = 350,
 ): { threshold: number; events: LargeTrade[] } {
-  const recent = trades.slice(-1500);
+  const recent = trades.slice(-3000);
   if (recent.length < 20) return { threshold: absoluteFloor, events: [] };
   const notionals = recent.map((trade) => trade.notional).sort((a, b) => a - b);
   const threshold = Math.max(absoluteFloor, quantile(notionals, percentile));

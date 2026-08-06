@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { calculateAnalytics } from "./analytics";
+import { buildFootprints, FootprintAccumulator } from "./footprint";
 import { MARKETS } from "./markets";
 import { loadSnapshot, streamMarket, type ProviderController } from "./providers";
 import { EventRecorder, reduceReplay } from "./recorder";
@@ -17,6 +18,17 @@ import type {
 } from "./types";
 
 const EMPTY_METRICS: MarketMetrics = { timestamp: 0, quality: "unavailable" };
+const EMPTY_FOOTPRINT = {
+  quality: "aggregate-only" as const,
+  source: "none" as const,
+  contiguous: true,
+  eventCount: 0,
+  detail: "No footprint data yet",
+};
+
+function validMarket(value: string | null): MarketKey {
+  return value && value in MARKETS ? value as MarketKey : "BTC";
+}
 
 function initialState(marketKey: MarketKey, timeframe: Timeframe): MarketState {
   const market = MARKETS[marketKey];
@@ -25,6 +37,8 @@ function initialState(marketKey: MarketKey, timeframe: Timeframe): MarketState {
     timeframe,
     candles: [],
     trades: [],
+    footprints: [],
+    footprintCoverage: EMPTY_FOOTPRINT,
     book: null,
     metrics: EMPTY_METRICS,
     analytics: { dataQuality: market.quality },
@@ -46,8 +60,30 @@ function mergeCandle(candles: Candle[], candle: Candle): Candle[] {
   return [...candles, candle].sort((a, b) => a.time - b.time).slice(-5000);
 }
 
+function mergeCandles(left: Candle[], right: Candle[]): Candle[] {
+  const map = new Map<number, Candle>();
+  for (const candle of [...left, ...right]) map.set(candle.time, candle);
+  return [...map.values()].sort((a, b) => a.time - b.time).slice(-5000);
+}
+
+function mergeTrades(left: Trade[], right: Trade[]): Trade[] {
+  const map = new Map<string, Trade>();
+  for (const trade of [...left, ...right]) map.set(trade.id, trade);
+  return [...map.values()].sort((a, b) => a.exchangeTime - b.exchangeTime || (a.sequence ?? 0) - (b.sequence ?? 0)).slice(-25_000);
+}
+
 function eventId(type: string, time: number, suffix = ""): string {
   return `${type}-${time}-${suffix}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sequenceGap(trades: Trade[]): { time: number; detail: string } | undefined {
+  const sequenced = trades.filter((trade) => trade.sequence !== undefined).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+  for (let index = 1; index < sequenced.length; index += 1) {
+    const previous = sequenced[index - 1].sequence ?? 0;
+    const current = sequenced[index].sequence ?? 0;
+    if (current > previous + 1) return { time: sequenced[index].exchangeTime, detail: `Aggregate-trade gap: expected ${previous + 1}, received ${current}` };
+  }
+  return undefined;
 }
 
 export interface EngineApi {
@@ -67,7 +103,7 @@ export interface EngineApi {
 }
 
 export function useMarketEngine(): EngineApi {
-  const [marketKey, setMarketKey] = useState<MarketKey>(() => (localStorage.getItem("vf-market") as MarketKey) || "BTC");
+  const [marketKey, setMarketKey] = useState<MarketKey>(() => validMarket(localStorage.getItem("vf-market")));
   const [timeframe, setTimeframeState] = useState<Timeframe>(() => (localStorage.getItem("vf-timeframe") as Timeframe) || "5m");
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [liveState, setLiveState] = useState<MarketState>(() => initialState(marketKey, timeframe));
@@ -75,6 +111,7 @@ export function useMarketEngine(): EngineApi {
   const modelRef = useRef(liveState);
   const recorderRef = useRef(new EventRecorder());
   const controllerRef = useRef<ProviderController | null>(null);
+  const footprintRef = useRef(new FootprintAccumulator(MARKETS[marketKey], timeframe));
   const flushTimerRef = useRef<number | null>(null);
   const eventsThisSecondRef = useRef(0);
   const rateRef = useRef(0);
@@ -84,9 +121,19 @@ export function useMarketEngine(): EngineApi {
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
       const model = modelRef.current;
+      const footprint = footprintRef.current.snapshot();
+      model.footprints = footprint.footprints;
+      model.footprintCoverage = footprint.coverage;
       model.analytics = calculateAnalytics(model.candles, model.trades, model.book, model.market.quality);
       model.eventRate = rateRef.current;
-      setLiveState({ ...model, candles: model.candles.slice(), trades: model.trades.slice(), analytics: { ...model.analytics } });
+      setLiveState({
+        ...model,
+        candles: model.candles.slice(),
+        trades: model.trades.slice(),
+        footprints: model.footprints.slice(),
+        footprintCoverage: { ...model.footprintCoverage },
+        analytics: { ...model.analytics },
+      });
     }, 80);
   }, []);
 
@@ -114,6 +161,7 @@ export function useMarketEngine(): EngineApi {
     const next = initialState(marketKey, timeframe);
     modelRef.current = next;
     setLiveState(next);
+    footprintRef.current = new FootprintAccumulator(market, timeframe);
     recorderRef.current.reset(marketKey);
     setReplay({ mode: "live", playing: false, speed: 1, cursor: 0, events: [] });
 
@@ -123,7 +171,7 @@ export function useMarketEngine(): EngineApi {
     };
     const touch = (exchangeTime: number) => {
       const model = modelRef.current;
-      model.lastEventAt = Date.now();
+      model.lastEventAt = exchangeTime;
       model.eventLagMs = Math.max(0, Date.now() - exchangeTime);
       if (model.status === "stale") { model.status = "live"; model.statusDetail = "Market stream recovered"; }
     };
@@ -138,14 +186,23 @@ export function useMarketEngine(): EngineApi {
     void loadSnapshot(market, timeframe, abort.signal).then((snapshot) => {
       if (abort.signal.aborted) return;
       const model = modelRef.current;
-      model.candles = snapshot.candles;
-      model.book = snapshot.book;
+      model.candles = mergeCandles(snapshot.candles, model.candles);
+      model.trades = mergeTrades(snapshot.trades, model.trades);
+      model.book = snapshot.book ?? model.book;
       model.metrics = snapshot.metrics;
       model.status = "syncing";
-      model.statusDetail = "Historical snapshot loaded; waiting for live synchronization";
-      model.lastEventAt = Date.now();
+      model.statusDetail = `Historical snapshot and ${snapshot.trades.length.toLocaleString()} aggregate trades loaded; synchronizing live stream`;
+      model.lastEventAt = Math.max(snapshot.tradeCoverage.endTime ?? 0, Date.now());
+      footprintRef.current.reset(model.candles, model.trades, snapshot.tradeCoverage, Date.now());
+      if (market.provider === "Binance") {
+        const gap = sequenceGap(model.trades);
+        if (gap) footprintRef.current.markGap(gap.time, gap.detail);
+      }
       for (const candle of snapshot.candles.slice(-500)) {
         record({ id: eventId("candle", candle.time), type: "candle", market: marketKey, exchangeTime: candle.endTime, receiveTime: Date.now(), payload: candle });
+      }
+      for (const trade of snapshot.trades) {
+        record({ id: eventId("trade", trade.exchangeTime, trade.id), type: "trade", market: marketKey, exchangeTime: trade.exchangeTime, receiveTime: trade.receiveTime, payload: trade });
       }
       if (snapshot.book) record({ id: eventId("book", snapshot.book.exchangeTime), type: "book", market: marketKey, exchangeTime: snapshot.book.exchangeTime, receiveTime: snapshot.book.receiveTime, payload: snapshot.book });
       record({ id: eventId("metrics", snapshot.metrics.timestamp), type: "metrics", market: marketKey, exchangeTime: snapshot.metrics.timestamp, receiveTime: Date.now(), payload: snapshot.metrics });
@@ -158,6 +215,7 @@ export function useMarketEngine(): EngineApi {
       onCandle: (candle) => {
         const model = modelRef.current;
         model.candles = mergeCandle(model.candles, candle);
+        footprintRef.current.upsertCandle(candle);
         touch(candle.endTime);
         record({ id: eventId("candle", candle.time), type: "candle", market: marketKey, exchangeTime: candle.endTime, receiveTime: Date.now(), payload: candle });
         flush();
@@ -165,9 +223,22 @@ export function useMarketEngine(): EngineApi {
       onTrade: (trade: Trade) => {
         const model = modelRef.current;
         if (model.trades.some((item) => item.id === trade.id)) return;
-        model.trades = [...model.trades, trade].slice(-3000);
+        if (market.provider === "Binance" && trade.sequence !== undefined) {
+          const previous = [...model.trades].reverse().find((item) => item.sequence !== undefined)?.sequence;
+          if (previous !== undefined && trade.sequence > previous + 1) {
+            footprintRef.current.markGap(trade.exchangeTime, `Aggregate-trade gap: expected ${previous + 1}, received ${trade.sequence}`);
+          }
+        }
+        model.trades = mergeTrades(model.trades, [trade]);
+        footprintRef.current.ingestTrade(trade);
         touch(trade.exchangeTime);
         record({ id: eventId("trade", trade.exchangeTime, trade.id), type: "trade", market: marketKey, exchangeTime: trade.exchangeTime, receiveTime: trade.receiveTime, payload: trade });
+        flush();
+      },
+      onTradeGap: (exchangeTime, detail) => {
+        footprintRef.current.markGap(exchangeTime, detail);
+        const model = modelRef.current;
+        model.statusDetail = detail;
         flush();
       },
       onBook: (book: OrderBook) => {
@@ -208,7 +279,31 @@ export function useMarketEngine(): EngineApi {
   const displayState = useMemo(() => {
     if (replay.mode === "live") return liveState;
     const reduced = reduceReplay(liveState, replay);
-    const state = { ...liveState, ...reduced, statusDetail: replay.importedName ? `Replay: ${replay.importedName}` : "Recorded session replay" };
+    const state: MarketState = {
+      ...liveState,
+      ...reduced,
+      statusDetail: replay.importedName ? `Replay: ${replay.importedName}` : "Recorded session replay",
+    };
+    const firstTrade = state.trades[0]?.exchangeTime;
+    const lastTrade = state.trades.at(-1)?.exchangeTime;
+    const footprint = buildFootprints(
+      state.market,
+      state.timeframe,
+      state.candles,
+      state.trades,
+      {
+        source: "replay",
+        startTime: firstTrade,
+        endTime: lastTrade,
+        contiguous: true,
+        eventCount: state.trades.length,
+        detail: "Rebuilt from replay trade events",
+      },
+      lastTrade ?? Date.now(),
+      true,
+    );
+    state.footprints = footprint.footprints;
+    state.footprintCoverage = footprint.coverage;
     state.analytics = calculateAnalytics(state.candles, state.trades, state.book, state.market.quality);
     return state;
   }, [liveState, replay]);

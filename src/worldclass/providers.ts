@@ -1,6 +1,7 @@
 import { MARKETS, timeframeMs } from "./markets";
 import { BinanceLocalBook, normalizeBook, type BinanceDepthSnapshot, type BinanceDepthUpdate } from "./orderBook";
 import type {
+  BinanceProduct,
   BookLevel,
   Candle,
   ConnectionState,
@@ -10,9 +11,12 @@ import type {
   Timeframe,
   Trade,
 } from "./types";
+import type { TradeCoverageInput } from "./footprint";
 
 export interface Snapshot {
   candles: Candle[];
+  trades: Trade[];
+  tradeCoverage: TradeCoverageInput;
   book: OrderBook | null;
   metrics: MarketMetrics;
 }
@@ -20,6 +24,7 @@ export interface Snapshot {
 export interface ProviderHandlers {
   onCandle: (candle: Candle) => void;
   onTrade: (trade: Trade) => void;
+  onTradeGap?: (exchangeTime: number, detail: string) => void;
   onBook: (book: OrderBook) => void;
   onMetrics: (metrics: MarketMetrics) => void;
   onState: (state: ConnectionState, detail: string) => void;
@@ -27,14 +32,36 @@ export interface ProviderHandlers {
 
 export interface ProviderController { close: () => void; }
 
-const BINANCE_REST = [
-  "https://api.binance.com/api/v3",
-  "https://api1.binance.com/api/v3",
-  "https://data-api.binance.vision/api/v3",
-];
-const BINANCE_WS = ["wss://stream.binance.com:9443/stream", "wss://stream.binance.com:443/stream"];
+interface BinanceApiConfig {
+  product: BinanceProduct;
+  rest: string[];
+  ws: string[];
+}
+
+const BINANCE_SPOT: BinanceApiConfig = {
+  product: "spot",
+  rest: [
+    "https://api.binance.com/api/v3",
+    "https://api1.binance.com/api/v3",
+    "https://data-api.binance.vision/api/v3",
+  ],
+  ws: ["wss://stream.binance.com:9443/stream", "wss://stream.binance.com:443/stream"],
+};
+
+const BINANCE_USDM: BinanceApiConfig = {
+  product: "usdm",
+  rest: ["https://fapi.binance.com/fapi/v1"],
+  ws: ["wss://fstream.binance.com/stream"],
+};
+
 const HYPERLIQUID_INFO = "https://api.hyperliquid.xyz/info";
 const HYPERLIQUID_WS = "wss://api.hyperliquid.xyz/ws";
+const MAX_AGG_TRADE_PAGES = 15;
+const AGG_TRADE_PAGE_SIZE = 1000;
+
+export function binanceApiConfig(market: MarketDefinition): BinanceApiConfig {
+  return market.binanceProduct === "usdm" ? BINANCE_USDM : BINANCE_SPOT;
+}
 
 function numberOr(value: unknown, fallback = 0): number {
   const number = typeof value === "number" ? value : Number(value);
@@ -57,9 +84,9 @@ async function fetchJson<T>(url: string, init: RequestInit = {}, timeoutMs = 12_
   }
 }
 
-async function fetchBinance<T>(path: string, signal?: AbortSignal): Promise<T> {
+async function fetchBinance<T>(market: MarketDefinition, path: string, signal?: AbortSignal): Promise<T> {
   let lastError: unknown;
-  for (const host of BINANCE_REST) {
+  for (const host of binanceApiConfig(market).rest) {
     try { return await fetchJson<T>(`${host}${path}`, { signal }); }
     catch (error) { lastError = error; if (signal?.aborted) throw error; }
   }
@@ -75,7 +102,10 @@ async function hyperliquidInfo<T>(payload: unknown, signal?: AbortSignal): Promi
   }, 15_000);
 }
 
-function binanceKline(row: [number, string, string, string, string, string, number, string, number, string, string, string]): Candle {
+type BinanceKline = [number, string, string, string, string, string, number, string, number, string, string, string];
+interface BinanceAggTrade { a: number; p: string; q: string; f: number; l: number; T: number; m: boolean; }
+
+function binanceKline(row: BinanceKline): Candle {
   const volume = numberOr(row[5]);
   const buy = numberOr(row[9]);
   return {
@@ -93,23 +123,126 @@ function mapBinanceStreamKline(raw: Record<string, unknown>): Candle {
   };
 }
 
+export function mapBinanceAggTrade(market: MarketDefinition, raw: BinanceAggTrade, source: Trade["source"]): Trade {
+  const price = numberOr(raw.p);
+  const size = numberOr(raw.q);
+  return {
+    id: `${market.key}-agg-${raw.a}`,
+    sequence: raw.a,
+    exchangeTime: raw.T,
+    receiveTime: Date.now(),
+    price,
+    size,
+    side: raw.m ? "sell" : "buy",
+    notional: price * size,
+    source,
+  };
+}
+
+function sequencesContiguous(rows: BinanceAggTrade[]): boolean {
+  for (let index = 1; index < rows.length; index += 1) {
+    if (rows[index].a !== rows[index - 1].a + 1) return false;
+  }
+  return true;
+}
+
+async function loadRecentAggTrades(
+  market: MarketDefinition,
+  candles: Candle[],
+  timeframe: Timeframe,
+  signal?: AbortSignal,
+): Promise<{ trades: Trade[]; coverage: TradeCoverageInput }> {
+  const latest = await fetchBinance<BinanceAggTrade[]>(market, `/aggTrades?symbol=${market.providerSymbol}&limit=${AGG_TRADE_PAGE_SIZE}`, signal);
+  if (!latest.length) {
+    return {
+      trades: [],
+      coverage: { source: "binance-aggtrades", contiguous: true, eventCount: 0, detail: "No aggregate trades returned" },
+    };
+  }
+
+  const targetStart = Math.max(
+    candles[Math.max(0, candles.length - 12)]?.time ?? Date.now() - timeframeMs(timeframe) * 12,
+    Date.now() - 60 * 60_000,
+  );
+  const byId = new Map<number, BinanceAggTrade>(latest.map((row) => [row.a, row]));
+  let earliestId = Math.min(...latest.map((row) => row.a));
+  let earliestTime = Math.min(...latest.map((row) => row.T));
+  let pageCount = 1;
+
+  while (pageCount < MAX_AGG_TRADE_PAGES && earliestTime > targetStart && earliestId > 0) {
+    const fromId = Math.max(0, earliestId - AGG_TRADE_PAGE_SIZE);
+    const page = await fetchBinance<BinanceAggTrade[]>(market, `/aggTrades?symbol=${market.providerSymbol}&fromId=${fromId}&limit=${AGG_TRADE_PAGE_SIZE}`, signal);
+    const older = page.filter((row) => row.a < earliestId);
+    if (!older.length) break;
+    older.forEach((row) => byId.set(row.a, row));
+    earliestId = Math.min(...older.map((row) => row.a));
+    earliestTime = Math.min(...older.map((row) => row.T));
+    pageCount += 1;
+  }
+
+  const rows = [...byId.values()].sort((a, b) => a.a - b.a);
+  const contiguous = sequencesContiguous(rows);
+  const trades = rows.map((row) => mapBinanceAggTrade(market, row, "backfill"));
+  const first = trades[0];
+  const last = trades.at(-1);
+  return {
+    trades,
+    coverage: {
+      source: "binance-aggtrades",
+      startTime: first?.exchangeTime,
+      endTime: last?.exchangeTime,
+      contiguous,
+      eventCount: trades.length,
+      detail: `${trades.length.toLocaleString()} contiguous aggregate trades loaded across ${pageCount} REST page${pageCount === 1 ? "" : "s"}`,
+    },
+  };
+}
+
+async function loadBinanceMetrics(market: MarketDefinition, signal?: AbortSignal): Promise<MarketMetrics> {
+  if (market.binanceProduct === "usdm") {
+    const [ticker, premium, openInterest] = await Promise.all([
+      fetchBinance<{ lastPrice: string; quoteVolume: string }>(market, `/ticker/24hr?symbol=${market.providerSymbol}`, signal),
+      fetchBinance<{ markPrice: string; indexPrice: string; lastFundingRate: string; time: number }>(market, `/premiumIndex?symbol=${market.providerSymbol}`, signal),
+      fetchBinance<{ openInterest: string; time: number }>(market, `/openInterest?symbol=${market.providerSymbol}`, signal),
+    ]);
+    return {
+      markPrice: numberOr(premium.markPrice, numberOr(ticker.lastPrice)),
+      oraclePrice: numberOr(premium.indexPrice, NaN),
+      fundingRate: numberOr(premium.lastFundingRate, NaN),
+      openInterest: numberOr(openInterest.openInterest, NaN),
+      dayVolume: numberOr(ticker.quoteVolume),
+      dayVolumeUnit: "usd-notional",
+      timestamp: premium.time || Date.now(),
+      quality: "full",
+    };
+  }
+  const ticker = await fetchBinance<{ lastPrice: string; volume: string }>(market, `/ticker/24hr?symbol=${market.providerSymbol}`, signal);
+  return {
+    markPrice: numberOr(ticker.lastPrice),
+    dayVolume: numberOr(ticker.volume),
+    dayVolumeUnit: "base",
+    timestamp: Date.now(),
+    quality: "full",
+  };
+}
+
 async function loadBinance(market: MarketDefinition, timeframe: Timeframe, signal?: AbortSignal): Promise<Snapshot> {
-  type Kline = [number, string, string, string, string, string, number, string, number, string, string, string];
-  const [rows, depth, ticker] = await Promise.all([
-    fetchBinance<Kline[]>(`/klines?symbol=${market.providerSymbol}&interval=${timeframe}&limit=1000`, signal),
-    fetchBinance<BinanceDepthSnapshot>(`/depth?symbol=${market.providerSymbol}&limit=1000`, signal),
-    fetchBinance<{ lastPrice: string; volume: string }>(`/ticker/24hr?symbol=${market.providerSymbol}`, signal),
+  const [rows, depth, metrics] = await Promise.all([
+    fetchBinance<BinanceKline[]>(market, `/klines?symbol=${market.providerSymbol}&interval=${timeframe}&limit=1000`, signal),
+    fetchBinance<BinanceDepthSnapshot>(market, `/depth?symbol=${market.providerSymbol}&limit=1000`, signal),
+    loadBinanceMetrics(market, signal),
   ]);
+  const candles = rows.map(binanceKline);
+  const backfill = await loadRecentAggTrades(market, candles, timeframe, signal);
   const local = new BinanceLocalBook();
   local.reset();
   local.applySnapshot(depth);
   return {
-    candles: rows.map(binanceKline),
+    candles,
+    trades: backfill.trades,
+    tradeCoverage: backfill.coverage,
     book: local.snapshot(Date.now()),
-    metrics: {
-      markPrice: numberOr(ticker.lastPrice), dayVolume: numberOr(ticker.volume), dayVolumeUnit: "base",
-      timestamp: Date.now(), quality: "full",
-    },
+    metrics,
   };
 }
 
@@ -151,7 +284,13 @@ async function loadHyperliquid(market: MarketDefinition, timeframe: Timeframe, s
     hyperliquidInfo<HlBook>({ type: "l2Book", coin: market.providerSymbol }, signal),
     hyperliquidInfo<HlMetaCtx>({ type: "metaAndAssetCtxs", dex: "xyz" }, signal),
   ]);
-  return { candles: candles.map(mapHlCandle).sort((a, b) => a.time - b.time), book: mapHlBook(book), metrics: mapHlMetrics(market, contexts) };
+  return {
+    candles: candles.map(mapHlCandle).sort((a, b) => a.time - b.time),
+    trades: [],
+    tradeCoverage: { source: "hyperliquid-live", contiguous: true, eventCount: 0, detail: "Hyperliquid footprint starts from live trades after connection" },
+    book: mapHlBook(book),
+    metrics: mapHlMetrics(market, contexts),
+  };
 }
 
 export function loadSnapshot(market: MarketDefinition, timeframe: Timeframe, signal?: AbortSignal): Promise<Snapshot> {
@@ -199,13 +338,14 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
   let resyncing = false;
   let metricsTimer: number | null = null;
   let controller: ProviderController | null = null;
+  let lastTradeSequence: number | undefined;
 
   const syncSnapshot = async () => {
     if (resyncing) return;
     resyncing = true;
-    handlers.onState("syncing", "Synchronizing Binance local order book");
+    handlers.onState("syncing", `Synchronizing ${market.venue} local order book`);
     try {
-      const snapshot = await fetchBinance<BinanceDepthSnapshot>(`/depth?symbol=${market.providerSymbol}&limit=1000`);
+      const snapshot = await fetchBinance<BinanceDepthSnapshot>(market, `/depth?symbol=${market.providerSymbol}&limit=1000`);
       local.applySnapshot(snapshot);
       handlers.onBook(local.snapshot(Date.now()));
       handlers.onState("live", `Synchronized at update ${local.sequence}`);
@@ -217,9 +357,10 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
 
   controller = createReconnectLoop((attempt) => {
     local.reset();
+    const config = binanceApiConfig(market);
     const symbol = market.providerSymbol.toLowerCase();
     const streams = `${symbol}@depth@100ms/${symbol}@aggTrade/${symbol}@kline_${timeframe}`;
-    const socket = new WebSocket(`${BINANCE_WS[attempt % BINANCE_WS.length]}?streams=${streams}`);
+    const socket = new WebSocket(`${config.ws[attempt % config.ws.length]}?streams=${streams}`);
     socket.addEventListener("open", () => void syncSnapshot());
     socket.addEventListener("message", (event) => {
       let message: { stream?: string; data?: Record<string, unknown> };
@@ -228,7 +369,7 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
       const stream = message.stream ?? "";
       if (stream.includes("@depth")) {
         const update: BinanceDepthUpdate = {
-          E: numberOr(data.E, Date.now()), U: numberOr(data.U), u: numberOr(data.u),
+          E: numberOr(data.E, Date.now()), U: numberOr(data.U), u: numberOr(data.u), pu: data.pu === undefined ? undefined : numberOr(data.pu),
           b: (data.b as Array<[string, string]>) ?? [], a: (data.a as Array<[string, string]>) ?? [],
         };
         try {
@@ -240,14 +381,22 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
           void syncSnapshot();
         }
       } else if (stream.includes("@aggTrade")) {
-        const price = numberOr(data.p);
-        const size = numberOr(data.q);
+        const sequence = numberOr(data.a);
         const exchangeTime = numberOr(data.T, numberOr(data.E, Date.now()));
-        handlers.onTrade({
-          id: `${market.key}-${String(data.a ?? data.f ?? exchangeTime)}`,
-          exchangeTime, receiveTime: Date.now(), price, size,
-          side: data.m ? "sell" : "buy", notional: price * size,
-        });
+        if (lastTradeSequence !== undefined && sequence > lastTradeSequence + 1) {
+          handlers.onTradeGap?.(exchangeTime, `Aggregate-trade gap: expected ${lastTradeSequence + 1}, received ${sequence}`);
+        }
+        if (lastTradeSequence !== undefined && sequence <= lastTradeSequence) return;
+        lastTradeSequence = sequence;
+        handlers.onTrade(mapBinanceAggTrade(market, {
+          a: sequence,
+          p: String(data.p ?? "0"),
+          q: String(data.q ?? "0"),
+          f: numberOr(data.f),
+          l: numberOr(data.l),
+          T: exchangeTime,
+          m: Boolean(data.m),
+        }, "live"));
       } else if (stream.includes("@kline_")) {
         const raw = data.k as Record<string, unknown> | undefined;
         if (raw) handlers.onCandle(mapBinanceStreamKline(raw));
@@ -257,10 +406,8 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
   }, handlers);
 
   const pollMetrics = async () => {
-    try {
-      const ticker = await fetchBinance<{ lastPrice: string; volume: string }>(`/ticker/24hr?symbol=${market.providerSymbol}`);
-      handlers.onMetrics({ markPrice: numberOr(ticker.lastPrice), dayVolume: numberOr(ticker.volume), dayVolumeUnit: "base", timestamp: Date.now(), quality: "full" });
-    } catch { /* streaming remains usable */ }
+    try { handlers.onMetrics(await loadBinanceMetrics(market)); }
+    catch { /* streaming remains usable */ }
   };
   metricsTimer = window.setInterval(() => void pollMetrics(), 15_000);
   void pollMetrics();
@@ -300,7 +447,17 @@ function streamHyperliquid(market: MarketDefinition, timeframe: Timeframe, handl
         const rows = (Array.isArray(message.data) ? message.data : []) as Array<{ coin: string; side: string; px: string; sz: string; hash: string; time: number; tid: number }>;
         for (const raw of rows) {
           const price = numberOr(raw.px); const size = numberOr(raw.sz);
-          handlers.onTrade({ id: `${raw.time}-${raw.coin}-${raw.tid}`, exchangeTime: raw.time, receiveTime: Date.now(), price, size, side: raw.side === "B" ? "buy" : "sell", notional: price * size });
+          handlers.onTrade({
+            id: `${raw.time}-${raw.coin}-${raw.tid}`,
+            sequence: raw.tid,
+            exchangeTime: raw.time,
+            receiveTime: Date.now(),
+            price,
+            size,
+            side: raw.side === "B" ? "buy" : "sell",
+            notional: price * size,
+            source: "live",
+          });
         }
       } else if (message.channel === "activeAssetCtx") {
         const raw = message.data as { ctx?: HlCtx };

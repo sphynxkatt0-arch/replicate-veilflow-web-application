@@ -1,6 +1,6 @@
 import type { Candle, MarketDefinition, MarketMetrics, MarketState, NormalizedEvent, OrderBook, ReplayState, Trade } from "./types";
 
-const MAX_EVENTS = 30_000;
+const MAX_EVENTS = 200_000;
 
 export class EventRecorder {
   private events: NormalizedEvent[] = [];
@@ -22,7 +22,7 @@ export class EventRecorder {
 
   exportJson(market: MarketDefinition, timeframe: string): string {
     return JSON.stringify({
-      format: "veilflow-session-v1",
+      format: "veilflow-session-v2",
       createdAt: Date.now(),
       market,
       timeframe,
@@ -32,8 +32,12 @@ export class EventRecorder {
 
   importJson(raw: string): NormalizedEvent[] {
     const parsed = JSON.parse(raw) as { format?: string; events?: NormalizedEvent[] };
-    if (parsed.format !== "veilflow-session-v1" || !Array.isArray(parsed.events)) throw new Error("Unsupported VeilFlow replay file");
-    this.events = parsed.events.slice(-MAX_EVENTS);
+    if (!["veilflow-session-v1", "veilflow-session-v2"].includes(parsed.format ?? "") || !Array.isArray(parsed.events)) {
+      throw new Error("Unsupported VeilFlow replay file");
+    }
+    this.events = parsed.events
+      .filter((event) => event && typeof event === "object" && typeof event.type === "string")
+      .slice(-MAX_EVENTS);
     this.marketKey = this.events[0]?.market ?? null;
     return this.snapshot();
   }
@@ -44,7 +48,7 @@ export function reduceReplay(
   replay: ReplayState,
 ): Pick<MarketState, "candles" | "trades" | "book" | "metrics" | "status" | "statusDetail" | "lastEventAt"> {
   const candles = new Map<number, Candle>();
-  let trades: Trade[] = [];
+  const trades: Trade[] = [];
   let book: OrderBook | null = null;
   let metrics: MarketMetrics = base.metrics;
   let status = base.status;
@@ -52,12 +56,10 @@ export function reduceReplay(
   let lastEventAt = 0;
 
   for (const event of replay.events.slice(0, replay.cursor + 1)) {
-    lastEventAt = event.receiveTime;
+    lastEventAt = event.exchangeTime;
     if (event.type === "candle") candles.set(event.payload.time, event.payload);
-    else if (event.type === "trade") {
-      trades.push(event.payload);
-      if (trades.length > 1200) trades = trades.slice(-1200);
-    } else if (event.type === "book") book = event.payload;
+    else if (event.type === "trade") trades.push({ ...event.payload, source: "replay" });
+    else if (event.type === "book") book = event.payload;
     else if (event.type === "metrics") metrics = event.payload;
     else if (event.type === "status") {
       status = event.payload.state;
@@ -67,7 +69,7 @@ export function reduceReplay(
 
   return {
     candles: [...candles.values()].sort((a, b) => a.time - b.time),
-    trades,
+    trades: trades.slice(-100_000),
     book,
     metrics,
     status,
