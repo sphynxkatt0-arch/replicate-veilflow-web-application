@@ -212,22 +212,45 @@ function mapBookSide(levels: Array<[string, string]>): BookLevel[] {
     .filter((level) => level.price > 0 && level.size > 0);
 }
 
+async function fetchBinanceCandleHistory(
+  market: MarketDefinition,
+  timeframe: Timeframe,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<Candle[]> {
+  const target = Math.max(1, Math.min(5000, limit));
+  const rows: BinanceKline[] = [];
+  let endTime: number | undefined;
+
+  while (rows.length < target) {
+    const pageLimit = Math.min(1000, target - rows.length);
+    const endTimeQuery = endTime === undefined ? "" : `&endTime=${endTime}`;
+    const page = await fetchBinance<BinanceKline[]>(
+      `/klines?symbol=${market.providerSymbol}&interval=${timeframe}&limit=${pageLimit}${endTimeQuery}`,
+      signal,
+    );
+    if (page.length === 0) break;
+    rows.unshift(...page);
+    endTime = page[0][0] - 1;
+    if (page.length < pageLimit) break;
+  }
+
+  return rows.slice(-target).map(mapBinanceKline);
+}
+
 async function loadBinanceSnapshot(
   market: MarketDefinition,
   timeframe: Timeframe,
   limit: number,
   signal?: AbortSignal,
 ): Promise<HistoricalSnapshot> {
-  const [rows, depth, ticker] = await Promise.all([
-    fetchBinance<BinanceKline[]>(
-      `/klines?symbol=${market.providerSymbol}&interval=${timeframe}&limit=${Math.min(1000, limit)}`,
-      signal,
-    ),
+  const [candles, depth, ticker] = await Promise.all([
+    fetchBinanceCandleHistory(market, timeframe, limit, signal),
     fetchBinance<BinanceDepth>(`/depth?symbol=${market.providerSymbol}&limit=20`, signal),
     fetchBinance<{ lastPrice: string; volume: string }>(`/ticker/24hr?symbol=${market.providerSymbol}`, signal),
   ]);
   return {
-    candles: rows.map(mapBinanceKline),
+    candles,
     book: { bids: mapBookSide(depth.bids), asks: mapBookSide(depth.asks), time: Date.now() },
     metrics: {
       markPrice: numberOr(ticker.lastPrice),
@@ -328,22 +351,48 @@ function findHyperliquidContext(
     : {};
 }
 
+async function fetchHyperliquidCandleHistory(
+  market: MarketDefinition,
+  timeframe: Timeframe,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<Candle[]> {
+  const target = Math.max(1, Math.min(5000, limit));
+  const interval = timeframeMs(timeframe);
+  const rows: HyperliquidCandle[] = [];
+  let endTime = Date.now();
+  const maxPages = Math.ceil(target / 500) + 2;
+
+  for (let pageNumber = 0; pageNumber < maxPages && rows.length < target; pageNumber += 1) {
+    const pageLimit = Math.min(500, target - rows.length);
+    const startTime = endTime - interval * (pageLimit + 2);
+    const page = await hyperliquidInfo<HyperliquidCandle[]>(
+      {
+        type: "candleSnapshot",
+        req: { coin: market.providerSymbol, interval: timeframe, startTime, endTime },
+      },
+      signal,
+    );
+    if (page.length === 0) break;
+    const sorted = page.slice().sort((a, b) => a.t - b.t);
+    rows.unshift(...sorted);
+    endTime = sorted[0].t - 1;
+  }
+
+  const unique = Array.from(new Map(rows.map((row) => [row.t, row])).values())
+    .sort((a, b) => a.t - b.t)
+    .slice(-target);
+  return unique.map(mapHyperliquidCandle);
+}
+
 async function loadHyperliquidSnapshot(
   market: MarketDefinition,
   timeframe: Timeframe,
   limit: number,
   signal?: AbortSignal,
 ): Promise<HistoricalSnapshot> {
-  const endTime = Date.now();
-  const startTime = endTime - timeframeMs(timeframe) * Math.min(5000, limit + 20);
   const [candles, book, contexts] = await Promise.all([
-    hyperliquidInfo<HyperliquidCandle[]>(
-      {
-        type: "candleSnapshot",
-        req: { coin: market.providerSymbol, interval: timeframe, startTime, endTime },
-      },
-      signal,
-    ),
+    fetchHyperliquidCandleHistory(market, timeframe, limit, signal),
     hyperliquidInfo<HyperliquidBook>({ type: "l2Book", coin: market.providerSymbol }, signal),
     hyperliquidInfo<HyperliquidMetaAndContexts>(
       { type: "metaAndAssetCtxs", dex: market.dex ?? "" },
@@ -351,7 +400,7 @@ async function loadHyperliquidSnapshot(
     ),
   ]);
   return {
-    candles: candles.slice(-limit).map(mapHyperliquidCandle),
+    candles,
     book: mapHyperliquidBook(book),
     metrics: findHyperliquidContext(market, contexts),
   };
@@ -475,10 +524,10 @@ function streamBinance(
             side: payload.m ? "sell" : "buy",
           },
         ]);
-      } else if (eventType === "depthUpdate") {
+      } else if (eventType === "depthUpdate" || envelope.stream?.includes("@depth")) {
         handlers.onBook({
-          bids: mapBookSide((payload.b as [string, string][]) ?? []),
-          asks: mapBookSide((payload.a as [string, string][]) ?? []),
+          bids: mapBookSide(((payload.b ?? payload.bids) as [string, string][]) ?? []),
+          asks: mapBookSide(((payload.a ?? payload.asks) as [string, string][]) ?? []),
           time: numberOr(payload.E, Date.now()),
         });
       }
@@ -507,12 +556,14 @@ function streamHyperliquid(
     (event) => {
       const message = JSON.parse(event.data) as { channel?: string; data?: unknown };
       if (message.channel === "candle") {
-        handlers.onCandle(mapHyperliquidCandle(message.data as HyperliquidCandle));
+        const rows = Array.isArray(message.data) ? message.data : [message.data];
+        const latest = rows.at(-1) as HyperliquidCandle | undefined;
+        if (latest) handlers.onCandle(mapHyperliquidCandle(latest));
       } else if (message.channel === "trades") {
         const rows = (message.data as Array<Record<string, unknown>>) ?? [];
         handlers.onTrades(
           rows.map((trade) => ({
-            id: String(trade.tid ?? `${trade.time}-${trade.px}-${trade.sz}`),
+            id: `${market.providerSymbol}-${trade.time}-${String(trade.tid ?? `${trade.px}-${trade.sz}`)}`,
             time: numberOr(trade.time),
             price: numberOr(trade.px),
             size: numberOr(trade.sz),
