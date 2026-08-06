@@ -1,5 +1,5 @@
 (() => {
-  const PROXY_SYMBOLS = {
+  const MARKET_IDENTITIES = {
     NQ: {
       option: "XYZ100 PERP · Hyperliquid",
       short: "XYZ100 PERP",
@@ -23,9 +23,13 @@
     },
   };
 
+  const setText = (node, value) => {
+    if (node && node.textContent !== value) node.textContent = value;
+  };
+
   const replaceExactText = (root, from, to) => {
     root.querySelectorAll("*").forEach((node) => {
-      if (node.children.length === 0 && node.textContent?.trim() === from) node.textContent = to;
+      if (node.children.length === 0 && node.textContent?.trim() === from) setText(node, to);
     });
   };
 
@@ -44,9 +48,10 @@
       banner.innerHTML = '<strong></strong><span></span>';
       header.insertAdjacentElement("afterend", banner);
     }
-    banner.dataset.tone = market === "BTC" ? "spot" : "proxy";
-    banner.querySelector("strong").textContent = PROXY_SYMBOLS[market].badge;
-    banner.querySelector("span").textContent = PROXY_SYMBOLS[market].detail;
+    const tone = market === "BTC" ? "spot" : "proxy";
+    if (banner.dataset.tone !== tone) banner.dataset.tone = tone;
+    setText(banner.querySelector("strong"), MARKET_IDENTITIES[market].badge);
+    setText(banner.querySelector("span"), MARKET_IDENTITIES[market].detail);
   };
 
   const ensureReplayNotice = () => {
@@ -65,25 +70,21 @@
 
   const apply = () => {
     const symbol = selectedSymbol();
-    const identity = PROXY_SYMBOLS[symbol] || PROXY_SYMBOLS.BTC;
+    const identity = MARKET_IDENTITIES[symbol] || MARKET_IDENTITIES.BTC;
     const marketSelect = document.querySelector('select[aria-label="Market"]');
     if (marketSelect) {
       [...marketSelect.options].forEach((option) => {
-        const key = option.value;
-        if (PROXY_SYMBOLS[key]) option.textContent = PROXY_SYMBOLS[key].option;
+        const target = MARKET_IDENTITIES[option.value]?.option;
+        if (target) setText(option, target);
       });
     }
 
-    const instrumentCopy = document.querySelector(".instrument-copy");
-    if (instrumentCopy) {
-      const title = instrumentCopy.querySelector("b");
-      if (title) title.textContent = identity.title;
-    }
+    setText(document.querySelector(".instrument-copy b"), identity.title);
 
     const marketTitleSmall = document.querySelector(".market-title small");
     if (marketTitleSmall) {
       const parts = marketTitleSmall.textContent?.split("·").map((part) => part.trim()) || [];
-      if (parts.length >= 2) marketTitleSmall.textContent = `${identity.short} · ${parts.slice(1).join(" · ")}`;
+      if (parts.length >= 2) setText(marketTitleSmall, `${identity.short} · ${parts.slice(1).join(" · ")}`);
     }
 
     replaceExactText(document, "Replay", "Bar Replay");
