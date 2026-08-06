@@ -23,14 +23,14 @@
   const parseSymbol = (url) => {
     const match = String(url).match(/streams=([^&]+)/i);
     if (!match) return null;
-    const stream = decodeURIComponent(match[1]);
-    const symbolMatch = stream.match(/(?:^|\/)([a-z0-9]+)@depth(?:20)?@100ms/i);
+    const streams = decodeURIComponent(match[1]);
+    const symbolMatch = streams.match(/(?:^|\/)([a-z0-9]+)@depth(?:20)?@100ms/i);
     return symbolMatch ? symbolMatch[1].toUpperCase() : null;
   };
 
   const rewriteUrl = (url) => String(url).replace(/@depth20@100ms/gi, "@depth@100ms");
-
   const createBook = () => ({ bids: new Map(), asks: new Map(), lastUpdateId: 0 });
+
   const applyLevels = (side, levels) => {
     for (const [price, quantity] of levels || []) {
       const size = Number(quantity);
@@ -38,6 +38,7 @@
       else side.set(price, quantity);
     }
   };
+
   const sorted = (side, descending) => [...side.entries()]
     .sort((a, b) => descending ? Number(b[0]) - Number(a[0]) : Number(a[0]) - Number(b[0]))
     .slice(0, 100);
@@ -68,9 +69,13 @@
         asks: sorted(book.asks, false),
         localBookState: "synced",
       };
-      const synthetic = new MessageEvent("message", { data: JSON.stringify(envelope) });
-      consumerOnMessage?.call(socket, synthetic);
-      socket.dispatchEvent(synthetic);
+      consumerOnMessage?.call(socket, new MessageEvent("message", { data: JSON.stringify(envelope) }));
+    };
+
+    const applyUpdate = (payload) => {
+      applyLevels(book.bids, payload.b);
+      applyLevels(book.asks, payload.a);
+      book.lastUpdateId = Number(payload.u);
     };
 
     const synchronize = async () => {
@@ -85,14 +90,27 @@
         applyLevels(book.asks, snapshot.asks);
         book.lastUpdateId = Number(snapshot.lastUpdateId);
 
-        buffered.sort((a, b) => Number(a.U) - Number(b.U));
-        while (buffered.length && Number(buffered[0].u) <= book.lastUpdateId) buffered.shift();
-        const first = buffered[0];
+        buffered.sort((a, b) => Number(a.payload.U) - Number(b.payload.U));
+        while (buffered.length && Number(buffered[0].payload.u) <= book.lastUpdateId) buffered.shift();
+        const first = buffered[0]?.payload;
         if (first && !(Number(first.U) <= book.lastUpdateId + 1 && Number(first.u) >= book.lastUpdateId + 1)) {
           buffered.length = 0;
           throw new Error("Binance initial depth sequence gap");
         }
+
         synced = true;
+        while (buffered.length) {
+          const entry = buffered.shift();
+          const payload = entry.payload;
+          if (Number(payload.u) <= book.lastUpdateId) continue;
+          if (Number(payload.U) > book.lastUpdateId + 1) {
+            buffered.unshift(entry);
+            synced = false;
+            throw new Error("Binance buffered depth sequence gap");
+          }
+          applyUpdate(payload);
+          emit(entry.event, payload);
+        }
       } catch (error) {
         console.warn("Binance local book resync", error);
         window.setTimeout(synchronize, 1000);
@@ -101,18 +119,17 @@
       }
     };
 
-    const nativeAddEventListener = socket.addEventListener.bind(socket);
-    nativeAddEventListener("message", (event) => {
+    socket.addEventListener("message", (event) => {
       let envelope;
       try { envelope = JSON.parse(event.data); } catch { return; }
       const payload = envelope.data || envelope;
-      if (payload.e !== "depthUpdate" || !payload.U || !payload.u) {
+      if (payload.e !== "depthUpdate" || payload.U === undefined || payload.u === undefined) {
         consumerOnMessage?.call(socket, event);
         return;
       }
 
       if (!synced) {
-        buffered.push(payload);
+        buffered.push({ event, payload });
         if (!resyncing) synchronize();
         return;
       }
@@ -122,14 +139,12 @@
       if (finalId <= book.lastUpdateId) return;
       if (firstId > book.lastUpdateId + 1) {
         buffered.length = 0;
-        buffered.push(payload);
+        buffered.push({ event, payload });
         synchronize();
         return;
       }
 
-      applyLevels(book.bids, payload.b);
-      applyLevels(book.asks, payload.a);
-      book.lastUpdateId = finalId;
+      applyUpdate(payload);
       emit(event, payload);
     });
 
