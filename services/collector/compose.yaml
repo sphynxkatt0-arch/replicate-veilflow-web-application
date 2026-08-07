@@ -1,0 +1,85 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: services/collector/Dockerfile
+    command: ["node", "services/collector/api.mjs"]
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      VEILFLOW_DATA_DIR: /data
+    ports: ["8787:8787"]
+    volumes: ["veilflow-data:/data"]
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: services/collector/Dockerfile
+    command: ["node", "services/collector/gateway.mjs"]
+    environment:
+      PORT: "8790"
+      HOST: "0.0.0.0"
+      VEILFLOW_DATA_DIR: /data
+    ports: ["8790:8790"]
+    volumes: ["veilflow-data:/data:ro"]
+    restart: unless-stopped
+
+  binance-spot:
+    build:
+      context: ../..
+      dockerfile: services/collector/Dockerfile
+    command: ["node", "services/collector/runtime.mjs"]
+    environment:
+      VEILFLOW_VENUE: binance
+      VEILFLOW_VENUE_SYMBOL: BTCUSDT
+      VEILFLOW_SYMBOL: BTC/USDT
+      VEILFLOW_PRODUCT_TYPE: spot
+      VEILFLOW_DATA_DIR: /data
+    volumes: ["veilflow-data:/data"]
+    restart: unless-stopped
+
+  binance-perpetual:
+    build:
+      context: ../..
+      dockerfile: services/collector/Dockerfile
+    command: ["node", "services/collector/runtime.mjs"]
+    environment:
+      VEILFLOW_VENUE: binance
+      VEILFLOW_VENUE_SYMBOL: BTCUSDT
+      VEILFLOW_SYMBOL: BTC/USDT
+      VEILFLOW_PRODUCT_TYPE: perpetual
+      VEILFLOW_DATA_DIR: /data
+    volumes: ["veilflow-data:/data"]
+    restart: unless-stopped
+
+  coinbase-spot:
+    build:
+      context: ../..
+      dockerfile: services/collector/Dockerfile
+    command: ["node", "services/collector/runtime.mjs"]
+    environment:
+      VEILFLOW_VENUE: coinbase
+      VEILFLOW_VENUE_SYMBOL: BTC-USD
+      VEILFLOW_SYMBOL: BTC/USD
+      VEILFLOW_PRODUCT_TYPE: spot
+      VEILFLOW_DATA_DIR: /data
+    volumes: ["veilflow-data:/data"]
+    restart: unless-stopped
+
+  okx-perpetual:
+    build:
+      context: ../..
+      dockerfile: services/collector/Dockerfile
+    command: ["node", "services/collector/runtime.mjs"]
+    environment:
+      VEILFLOW_VENUE: okx
+      VEILFLOW_VENUE_SYMBOL: BTC-USDT-SWAP
+      VEILFLOW_SYMBOL: BTC/USDT
+      VEILFLOW_PRODUCT_TYPE: perpetual
+      VEILFLOW_DATA_DIR: /data
+    volumes: ["veilflow-data:/data"]
+    restart: unless-stopped
+
+volumes:
+  veilflow-data:
