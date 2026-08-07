@@ -99,8 +99,8 @@ describe("regimes and cross-market research", () => {
 
   it("classifies synchronized and crossed liquidity", () => {
     const book: OrderBook = {
-      bids: [{ price: 100, size: 10 }, { price: 99, size: 8 }],
-      asks: [{ price: 101, size: 9 }, { price: 102, size: 8 }],
+      bids: [{ price: 100, size: 10 }, { price: 99.99, size: 8 }],
+      asks: [{ price: 100.01, size: 9 }, { price: 100.02, size: 8 }],
       exchangeTime: 1,
       receiveTime: 2,
       quality: "full",
