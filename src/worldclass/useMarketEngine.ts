@@ -25,6 +25,8 @@ const EMPTY_FOOTPRINT = {
   eventCount: 0,
   detail: "No footprint data yet",
 };
+const STALE_AFTER_MS = 8_000;
+const STALE_CHECK_MS = 250;
 
 function validMarket(value: string | null): MarketKey {
   return value && value in MARKETS ? value as MarketKey : "BTC";
@@ -73,7 +75,7 @@ function mergeTrades(left: Trade[], right: Trade[]): Trade[] {
 }
 
 function eventId(type: string, time: number, suffix = ""): string {
-  return `${type}-${time}-${suffix}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${type}-${time}-${suffix}`;
 }
 
 function sequenceGap(trades: Trade[]): { time: number; detail: string } | undefined {
@@ -138,17 +140,22 @@ export function useMarketEngine(): EngineApi {
   }, []);
 
   useEffect(() => {
+    let elapsed = 0;
     const interval = window.setInterval(() => {
-      rateRef.current = eventsThisSecondRef.current;
-      eventsThisSecondRef.current = 0;
+      elapsed += STALE_CHECK_MS;
+      if (elapsed >= 1_000) {
+        rateRef.current = eventsThisSecondRef.current;
+        eventsThisSecondRef.current = 0;
+        elapsed = 0;
+      }
       const current = modelRef.current;
-      if (current.lastEventAt && Date.now() - current.lastEventAt > 8_000 && current.status === "live") {
+      if (current.lastEventAt && Date.now() - current.lastEventAt > STALE_AFTER_MS && current.status === "live") {
         current.status = "stale";
         current.statusDetail = `No market event for ${Math.round((Date.now() - current.lastEventAt) / 1000)}s`;
         current.book = current.book ? { ...current.book, quality: "stale" } : null;
         flush();
       }
-    }, 1000);
+    }, STALE_CHECK_MS);
     return () => window.clearInterval(interval);
   }, [flush]);
 
@@ -177,9 +184,10 @@ export function useMarketEngine(): EngineApi {
     };
     const status = (state: ConnectionState, detail: string) => {
       const model = modelRef.current;
+      const now = Date.now();
       model.status = state;
       model.statusDetail = detail;
-      record({ id: eventId("status", Date.now()), type: "status", market: marketKey, exchangeTime: Date.now(), receiveTime: Date.now(), payload: { state, detail } });
+      record({ id: eventId("status", now, state), type: "status", market: marketKey, exchangeTime: now, receiveTime: now, payload: { state, detail } });
       flush();
     };
 
@@ -204,7 +212,7 @@ export function useMarketEngine(): EngineApi {
       for (const trade of snapshot.trades) {
         record({ id: eventId("trade", trade.exchangeTime, trade.id), type: "trade", market: marketKey, exchangeTime: trade.exchangeTime, receiveTime: trade.receiveTime, payload: trade });
       }
-      if (snapshot.book) record({ id: eventId("book", snapshot.book.exchangeTime), type: "book", market: marketKey, exchangeTime: snapshot.book.exchangeTime, receiveTime: snapshot.book.receiveTime, payload: snapshot.book });
+      if (snapshot.book) record({ id: eventId("book", snapshot.book.exchangeTime, String(snapshot.book.sequence ?? "")), type: "book", market: marketKey, exchangeTime: snapshot.book.exchangeTime, receiveTime: snapshot.book.receiveTime, payload: snapshot.book });
       record({ id: eventId("metrics", snapshot.metrics.timestamp), type: "metrics", market: marketKey, exchangeTime: snapshot.metrics.timestamp, receiveTime: Date.now(), payload: snapshot.metrics });
       flush();
     }).catch((error) => {
@@ -238,7 +246,9 @@ export function useMarketEngine(): EngineApi {
       onTradeGap: (exchangeTime, detail) => {
         footprintRef.current.markGap(exchangeTime, detail);
         const model = modelRef.current;
+        const receiveTime = Date.now();
         model.statusDetail = detail;
+        record({ id: eventId("gap", exchangeTime, detail), type: "status", market: marketKey, exchangeTime, receiveTime, payload: { state: model.status, detail } });
         flush();
       },
       onBook: (book: OrderBook) => {
@@ -286,6 +296,7 @@ export function useMarketEngine(): EngineApi {
     };
     const firstTrade = state.trades[0]?.exchangeTime;
     const lastTrade = state.trades.at(-1)?.exchangeTime;
+    const replayGap = state.market.provider === "Binance" ? sequenceGap(state.trades) : undefined;
     const footprint = buildFootprints(
       state.market,
       state.timeframe,
@@ -295,9 +306,9 @@ export function useMarketEngine(): EngineApi {
         source: "replay",
         startTime: firstTrade,
         endTime: lastTrade,
-        contiguous: true,
+        contiguous: replayGap === undefined,
         eventCount: state.trades.length,
-        detail: "Rebuilt from replay trade events",
+        detail: replayGap?.detail ?? "Rebuilt from replay trade events",
       },
       lastTrade ?? Date.now(),
       true,
@@ -332,9 +343,23 @@ export function useMarketEngine(): EngineApi {
   }, [marketKey, timeframe]);
 
   const importReplay = useCallback(async (file: File) => {
-    const events = recorderRef.current.importJson(await file.text());
+    const raw = await file.text();
+    const metadata = JSON.parse(raw) as { market?: { key?: MarketKey }; timeframe?: Timeframe };
+    if (metadata.market?.key && metadata.market.key !== marketKey) {
+      throw new Error(`Replay is ${metadata.market.key}; switch the workspace from ${marketKey} before importing`);
+    }
+    if (metadata.timeframe && metadata.timeframe !== timeframe) {
+      throw new Error(`Replay timeframe is ${metadata.timeframe}; switch the workspace from ${timeframe} before importing`);
+    }
+    const importer = new EventRecorder();
+    const events = importer.importJson(raw);
+    const importedMarket = events[0]?.market;
+    if (importedMarket && importedMarket !== marketKey) {
+      throw new Error(`Replay events are ${importedMarket}; current workspace is ${marketKey}`);
+    }
+    recorderRef.current = importer;
     setReplay({ mode: "events", playing: false, speed: 1, cursor: Math.max(0, events.length - 1), events, importedName: file.name });
-  }, []);
+  }, [marketKey, timeframe]);
 
   return { state: displayState, liveState, replay, setMarket, setTimeframe, enterReplay, exitReplay, setReplayCursor, toggleReplay, setReplaySpeed, exportReplay, importReplay, refresh };
 }
