@@ -1,6 +1,115 @@
+import { integrityHash } from "./integrity";
 import type { Candle, MarketDefinition, MarketMetrics, MarketState, NormalizedEvent, OrderBook, ReplayState, Trade } from "./types";
 
 const MAX_EVENTS = 200_000;
+const CHECKPOINT_EVENT_COUNT = 5_000;
+const REPLAY_FORMAT = "veilflow-session-v3" as const;
+
+export interface ReplayCheckpoint {
+  startCursor: number;
+  endCursor: number;
+  exchangeTime: number;
+  eventCount: number;
+  eventHash: string;
+}
+
+export interface ReplayArchiveV3 {
+  format: typeof REPLAY_FORMAT;
+  schemaVersion: 3;
+  createdAt: number;
+  market: MarketDefinition;
+  timeframe: string;
+  startTime?: number;
+  endTime?: number;
+  eventCount: number;
+  eventHash: string;
+  checkpointInterval: number;
+  checkpoints: ReplayCheckpoint[];
+  events: NormalizedEvent[];
+}
+
+interface LegacyReplayArchive {
+  format?: string;
+  events?: NormalizedEvent[];
+}
+
+function buildCheckpoints(events: NormalizedEvent[]): ReplayCheckpoint[] {
+  const checkpoints: ReplayCheckpoint[] = [];
+  for (let startCursor = 0; startCursor < events.length; startCursor += CHECKPOINT_EVENT_COUNT) {
+    const endCursor = Math.min(events.length - 1, startCursor + CHECKPOINT_EVENT_COUNT - 1);
+    const chunk = events.slice(startCursor, endCursor + 1);
+    checkpoints.push({
+      startCursor,
+      endCursor,
+      exchangeTime: chunk.at(-1)?.exchangeTime ?? 0,
+      eventCount: chunk.length,
+      eventHash: integrityHash(chunk),
+    });
+  }
+  return checkpoints;
+}
+
+export function createReplayArchive(
+  market: MarketDefinition,
+  timeframe: string,
+  events: NormalizedEvent[],
+  createdAt = Date.now(),
+): ReplayArchiveV3 {
+  const snapshot = events.slice(-MAX_EVENTS);
+  return {
+    format: REPLAY_FORMAT,
+    schemaVersion: 3,
+    createdAt,
+    market,
+    timeframe,
+    startTime: snapshot[0]?.exchangeTime,
+    endTime: snapshot.at(-1)?.exchangeTime,
+    eventCount: snapshot.length,
+    eventHash: integrityHash(snapshot),
+    checkpointInterval: CHECKPOINT_EVENT_COUNT,
+    checkpoints: buildCheckpoints(snapshot),
+    events: snapshot,
+  };
+}
+
+export function validateReplayArchive(archive: ReplayArchiveV3): void {
+  if (archive.format !== REPLAY_FORMAT || archive.schemaVersion !== 3) {
+    throw new Error("Unsupported VeilFlow replay schema");
+  }
+  if (!Array.isArray(archive.events) || !Array.isArray(archive.checkpoints)) {
+    throw new Error("Replay archive is missing events or checkpoints");
+  }
+  if (archive.eventCount !== archive.events.length) {
+    throw new Error(`Replay event count mismatch: manifest ${archive.eventCount}, payload ${archive.events.length}`);
+  }
+  if (archive.eventHash !== integrityHash(archive.events)) {
+    throw new Error("Replay event integrity hash mismatch");
+  }
+
+  const expectedCheckpoints = buildCheckpoints(archive.events);
+  if (archive.checkpoints.length !== expectedCheckpoints.length) {
+    throw new Error("Replay checkpoint count mismatch");
+  }
+  for (let index = 0; index < expectedCheckpoints.length; index += 1) {
+    const expected = expectedCheckpoints[index];
+    const actual = archive.checkpoints[index];
+    if (
+      actual.startCursor !== expected.startCursor
+      || actual.endCursor !== expected.endCursor
+      || actual.eventCount !== expected.eventCount
+      || actual.exchangeTime !== expected.exchangeTime
+      || actual.eventHash !== expected.eventHash
+    ) {
+      throw new Error(`Replay checkpoint ${index} integrity mismatch`);
+    }
+  }
+
+  const firstTime = archive.events[0]?.exchangeTime;
+  const lastTime = archive.events.at(-1)?.exchangeTime;
+  if (archive.startTime !== firstTime || archive.endTime !== lastTime) {
+    throw new Error("Replay time-range manifest mismatch");
+  }
+}
 
 export class EventRecorder {
   private events: NormalizedEvent[] = [];
@@ -21,21 +130,18 @@ export class EventRecorder {
   snapshot(): NormalizedEvent[] { return this.events.slice(); }
 
   exportJson(market: MarketDefinition, timeframe: string): string {
-    return JSON.stringify({
-      format: "veilflow-session-v2",
-      createdAt: Date.now(),
-      market,
-      timeframe,
-      events: this.events,
-    });
+    return JSON.stringify(createReplayArchive(market, timeframe, this.events));
   }
 
   importJson(raw: string): NormalizedEvent[] {
-    const parsed = JSON.parse(raw) as { format?: string; events?: NormalizedEvent[] };
-    if (!["veilflow-session-v1", "veilflow-session-v2"].includes(parsed.format ?? "") || !Array.isArray(parsed.events)) {
+    const parsed = JSON.parse(raw) as LegacyReplayArchive | ReplayArchiveV3;
+    if (parsed.format === REPLAY_FORMAT) {
+      validateReplayArchive(parsed as ReplayArchiveV3);
+    } else if (!["veilflow-session-v1", "veilflow-session-v2"].includes(parsed.format ?? "") || !Array.isArray(parsed.events)) {
       throw new Error("Unsupported VeilFlow replay file");
     }
-    this.events = parsed.events
+
+    this.events = (parsed.events ?? [])
       .filter((event) => event && typeof event === "object" && typeof event.type === "string")
       .slice(-MAX_EVENTS);
     this.marketKey = this.events[0]?.market ?? null;
