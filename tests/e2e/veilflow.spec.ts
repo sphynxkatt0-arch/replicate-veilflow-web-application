@@ -48,7 +48,7 @@ test("production-grade spot, perpetual, replay, and trust workflow", async ({ pa
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: /trust, replay, and methodology/i })).toBeHidden();
 
-  const openReplay = page.getByRole("button", { name: "Open Replay" });
+  const openReplay = page.getByRole("button", { name: "Open Replay", exact: true });
   await expect(openReplay).toBeVisible();
   await openReplay.click();
   const replayCursor = page.getByLabel("Replay event cursor");
@@ -58,10 +58,10 @@ test("production-grade spot, perpetual, replay, and trust workflow", async ({ pa
   const before = Number(await replayCursor.inputValue());
   await replayCursor.fill("0");
   await expect(replayCursor).toHaveValue("0");
-  await page.getByRole("button", { name: "Play" }).click();
+  await page.getByRole("button", { name: "Play", exact: true }).click();
   await expect.poll(async () => Number(await replayCursor.inputValue()), { timeout: 10_000 }).toBeGreaterThan(0);
   expect(Number(await replayCursor.inputValue())).not.toBe(before === 0 ? -1 : before);
-  await page.getByRole("button", { name: "Return Live" }).click();
+  await page.getByRole("button", { name: "Return Live", exact: true }).click();
   await expect(openReplay).toBeVisible();
 
   await page.keyboard.press("s");
