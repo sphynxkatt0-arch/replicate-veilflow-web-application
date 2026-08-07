@@ -153,7 +153,10 @@ export function installBrowserTelemetry(
     const events = buffer.drain(500);
     try { await transport.send(events); }
     catch {
-      for (const event of events) buffer.record({ ...event, id: undefined as never, at: event.at });
+      for (const event of events) {
+        const { id: _id, buildSha: _buildSha, ...retry } = event;
+        buffer.record(retry);
+      }
     }
   };
   const flushTimer = window.setInterval(() => { void flush(); }, flushIntervalMs);
