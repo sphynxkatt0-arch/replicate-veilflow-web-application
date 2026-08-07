@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { detectLargeTrades } from "./analytics";
 import { regroupFootprint } from "./footprint";
 import { clamp, formatCompact, formatNotional, formatPrice, formatTime } from "./format";
@@ -28,6 +28,21 @@ interface Props {
 
 type Cursor = { x: number; y: number } | null;
 
+interface RenderMeta {
+  dpr: number;
+  width: number;
+  height: number;
+  plotWidth: number;
+  plotHeight: number;
+  min: number;
+  max: number;
+  priceRange: number;
+  xStep: number;
+  displayStep: number;
+  visible: Candle[];
+  footprints: Map<number, FootprintCandle>;
+}
+
 const QUALITY_LABEL: Record<FootprintQuality, string> = {
   full: "FULL",
   "live-partial": "PARTIAL",
@@ -50,25 +65,76 @@ function volumeText(value: number): string {
   return value.toFixed(2);
 }
 
+function bigOrderLabel(value: number): string {
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)}B`;
+  if (absolute >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (absolute >= 100_000) return `$${Math.round(value / 1_000)}K`;
+  if (absolute >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
+  return `$${Math.round(value)}`;
+}
+
+function prepareCanvas(canvas: HTMLCanvasElement, width: number, height: number, dpr: number): CanvasRenderingContext2D | null {
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  if (canvas.style.width !== `${width}px`) canvas.style.width = `${width}px`;
+  if (canvas.style.height !== `${height}px`) canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+
 export function MarketChart({ state, mode, settings, replayActive, onFps }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const [size, setSize] = useState({ width: 1000, height: 620 });
   const [bars, setBars] = useState(80);
   const [offset, setOffset] = useState(0);
-  const [cursor, setCursor] = useState<Cursor>(null);
+  const cursorRef = useRef<Cursor>(null);
   const drag = useRef<{ x: number; offset: number } | null>(null);
-  const frameCount = useRef(0);
-  const frameStart = useRef(performance.now());
+  const renderMetaRef = useRef<RenderMeta | null>(null);
+  const overlayFrameRef = useRef<number | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
+  const pendingOffsetRef = useRef<number | null>(null);
 
   useEffect(() => {
     const element = wrapRef.current;
     if (!element) return;
-    const resize = () => setSize({ width: Math.max(300, element.clientWidth), height: Math.max(320, element.clientHeight) });
+    const resize = () => {
+      const next = { width: Math.max(300, element.clientWidth), height: Math.max(320, element.clientHeight) };
+      setSize((current) => current.width === next.width && current.height === next.height ? current : next);
+    };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(element);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!onFps) return;
+    let frame = 0;
+    let count = 0;
+    let started = performance.now();
+    const tick = (now: number) => {
+      count += 1;
+      if (now - started >= 1000) {
+        onFps(Math.round(count * 1000 / (now - started)));
+        count = 0;
+        started = now;
+      }
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [onFps]);
+
+  useEffect(() => () => {
+    if (overlayFrameRef.current !== null) window.cancelAnimationFrame(overlayFrameRef.current);
+    if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
   }, []);
 
   useEffect(() => { if (settings.autoFollow && !replayActive) setOffset(0); }, [state.candles.length, settings.autoFollow, replayActive]);
@@ -80,17 +146,62 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
   const large = useMemo(() => detectLargeTrades(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000), [state.trades, state.market.key]);
   const groupedBook = useMemo(() => groupBook(state.book, Math.max(state.market.tickSize, (state.book?.asks[0]?.price ?? 1) * 0.00005), 22), [state.book, state.market.tickSize]);
 
+  const drawOverlay = useCallback(() => {
+    const canvas = overlayRef.current;
+    const meta = renderMetaRef.current;
+    if (!canvas || !meta) return;
+    const ctx = prepareCanvas(canvas, meta.width, meta.height, meta.dpr);
+    if (!ctx) return;
+    ctx.clearRect(0, 0, meta.width, meta.height);
+    const cursor = cursorRef.current;
+    if (!cursor || cursor.x > meta.plotWidth || cursor.y > meta.plotHeight || cursor.x < 0 || cursor.y < 0 || !meta.visible.length) return;
+
+    ctx.strokeStyle = "#587188";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(cursor.x, 0); ctx.lineTo(cursor.x, meta.plotHeight); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, cursor.y); ctx.lineTo(meta.plotWidth, cursor.y); ctx.stroke();
+    ctx.setLineDash([]);
+
+    const index = clamp(Math.floor(cursor.x / meta.xStep), 0, meta.visible.length - 1);
+    const candle = meta.visible[index];
+    const hoverPrice = meta.max - cursor.y / meta.plotHeight * meta.priceRange;
+    const footprint = meta.footprints.get(candle.time);
+    const nearest = footprint?.rows.reduce((best, row) => !best || Math.abs(row.price - hoverPrice) < Math.abs(best.price - hoverPrice) ? row : best, undefined as FootprintCandle["rows"][number] | undefined);
+    const tooltipHeight = mode === "footprint" ? 50 : 34;
+    ctx.fillStyle = "rgba(8,14,22,.96)";
+    ctx.strokeStyle = "#263a4d";
+    ctx.fillRect(10, 10, 360, tooltipHeight);
+    ctx.strokeRect(10, 10, 360, tooltipHeight);
+    ctx.font = "9px JetBrains Mono, monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#91a4ba";
+    ctx.fillText(`${formatTime(candle.time, true)}  O ${formatPrice(candle.open, state.market.priceDecimals)}  H ${formatPrice(candle.high, state.market.priceDecimals)}  L ${formatPrice(candle.low, state.market.priceDecimals)}  C ${formatPrice(candle.close, state.market.priceDecimals)}`, 18, 22);
+    ctx.fillStyle = "#22d3e2";
+    ctx.fillText(`Cursor ${formatPrice(hoverPrice, state.market.priceDecimals)}`, 18, 36);
+    if (mode === "footprint" && footprint) {
+      ctx.fillStyle = qualityColor(footprint.quality);
+      ctx.fillText(`${QUALITY_LABEL[footprint.quality]}  Bid ${volumeText(nearest?.bidVolume ?? 0)} × Ask ${volumeText(nearest?.askVolume ?? 0)}  Δ ${volumeText(footprint.delta)}  POC ${formatPrice(footprint.pocPrice, state.market.priceDecimals)}`, 18, 51);
+    }
+  }, [mode, state.market.priceDecimals]);
+
+  const queueOverlay = useCallback(() => {
+    if (overlayFrameRef.current !== null) return;
+    overlayFrameRef.current = window.requestAnimationFrame(() => {
+      overlayFrameRef.current = null;
+      drawOverlay();
+    });
+  }, [drawOverlay]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const overlay = overlayRef.current;
+    if (!canvas || !overlay) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.round(size.width * dpr);
-    canvas.height = Math.round(size.height * dpr);
-    canvas.style.width = `${size.width}px`;
-    canvas.style.height = `${size.height}px`;
-    const ctx = canvas.getContext("2d");
+    const ctx = prepareCanvas(canvas, size.width, size.height, dpr);
+    prepareCanvas(overlay, size.width, size.height, dpr);
     if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const width = size.width;
     const height = size.height;
@@ -104,10 +215,12 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
     ctx.fillRect(0, 0, width, height);
 
     if (!visible.length) {
+      renderMetaRef.current = null;
       ctx.fillStyle = "#6d7c91";
       ctx.font = "12px Inter, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText("Waiting for market data…", width / 2, height / 2);
+      queueOverlay();
       return;
     }
 
@@ -130,6 +243,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
     const pixelsPerRequestedStep = requestedStep / priceRange * plotHeight;
     const autoMultiplier = mode === "footprint" ? Math.max(1, Math.ceil(7 / Math.max(0.001, pixelsPerRequestedStep))) : 1;
     const displayStep = Number((requestedStep * autoMultiplier).toPrecision(12));
+    const displayFootprints = new Map<number, FootprintCandle>();
 
     if (settings.showGrid) {
       ctx.strokeStyle = "#111c29";
@@ -196,6 +310,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       visible.forEach((candle, index) => {
         const raw = footprintByTime.get(candle.time);
         const footprint = raw ? regroupFootprint(raw, candle, displayStep, settings.footprintImbalanceRatio, settings.footprintMinVolume) : undefined;
+        if (footprint) displayFootprints.set(candle.time, footprint);
         const x = xFor(index);
         const cellWidth = Math.max(20, xStep * 0.88);
         const half = cellWidth / 2;
@@ -306,18 +421,40 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       ctx.fillText("SESSION VWAP", 10, y - 6);
     }
 
-    if (settings.showLargeTrades && !replayActive) {
-      const visibleStart = visible[0].time; const visibleEnd = visible.at(-1)!.endTime;
-      const maxLarge = Math.max(1, ...large.events.map((item) => item.notional));
+    if (settings.showLargeTrades) {
+      const visibleStart = visible[0].time;
+      const visibleEnd = visible.at(-1)!.endTime;
       for (const item of large.events) {
         if (item.time < visibleStart || item.time > visibleEnd) continue;
         const candleIndex = visible.findIndex((candle) => item.time >= candle.time && item.time <= candle.endTime);
         if (candleIndex < 0) continue;
-        const x = xFor(candleIndex); const y = yFor(item.price);
-        const radius = 4 + Math.sqrt(item.notional / maxLarge) * 11;
-        ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = item.side === "buy" ? "rgba(40,223,180,.24)" : "rgba(255,91,127,.24)";
-        ctx.fill(); ctx.strokeStyle = item.side === "buy" ? "#41f1c5" : "#ff7895"; ctx.lineWidth = 1.5; ctx.stroke();
+        const x = xFor(candleIndex);
+        const y = yFor(item.price);
+        if (y < -32 || y > plotHeight + 32) continue;
+        const relative = Math.max(1, item.notional / Math.max(1, large.threshold));
+        const radius = clamp(9 + Math.log2(relative + 1) * 5 + Math.min(4, Math.max(0, item.count - 1)), 10, 29);
+        const buy = item.side === "buy";
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = buy ? "rgba(40,223,180,.28)" : "rgba(255,91,127,.28)";
+        ctx.fill();
+        ctx.strokeStyle = buy ? "rgba(65,241,197,.9)" : "rgba(255,120,149,.92)";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(2.5, radius * 0.16), 0, Math.PI * 2);
+        ctx.fillStyle = buy ? "#41f1c5" : "#ff7895";
+        ctx.fill();
+        ctx.font = `800 ${radius >= 18 ? 8 : 7}px JetBrains Mono, monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#f6fbff";
+        ctx.fillText(bigOrderLabel(item.notional), x, y);
+        if (item.count > 1 && radius >= 17) {
+          ctx.font = "700 6px JetBrains Mono, monospace";
+          ctx.fillStyle = buy ? "#9effe5" : "#ffc0cf";
+          ctx.fillText(`×${item.count}`, x, y + radius * 0.48);
+        }
       }
     }
 
@@ -351,28 +488,6 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       ctx.fillText(formatPrice(latest, state.market.priceDecimals), plotWidth + 7, y);
     }
 
-    if (cursor && cursor.x <= plotWidth && cursor.y <= plotHeight) {
-      ctx.strokeStyle = "#587188"; ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(cursor.x, 0); ctx.lineTo(cursor.x, plotHeight); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, cursor.y); ctx.lineTo(plotWidth, cursor.y); ctx.stroke(); ctx.setLineDash([]);
-      const index = clamp(Math.floor(cursor.x / xStep), 0, visible.length - 1);
-      const candle = visible[index];
-      const hoverPrice = max - cursor.y / plotHeight * priceRange;
-      const raw = footprintByTime.get(candle.time);
-      const footprint = raw ? regroupFootprint(raw, candle, displayStep, settings.footprintImbalanceRatio, settings.footprintMinVolume) : undefined;
-      const nearest = footprint?.rows.reduce((best, row) => !best || Math.abs(row.price - hoverPrice) < Math.abs(best.price - hoverPrice) ? row : best, undefined as FootprintCandle["rows"][number] | undefined);
-      ctx.fillStyle = "rgba(8,14,22,.96)"; ctx.strokeStyle = "#263a4d";
-      ctx.fillRect(10, 10, 360, mode === "footprint" ? 50 : 34); ctx.strokeRect(10, 10, 360, mode === "footprint" ? 50 : 34);
-      ctx.font = "9px JetBrains Mono, monospace"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-      ctx.fillStyle = "#91a4ba";
-      ctx.fillText(`${formatTime(candle.time, true)}  O ${formatPrice(candle.open, state.market.priceDecimals)}  H ${formatPrice(candle.high, state.market.priceDecimals)}  L ${formatPrice(candle.low, state.market.priceDecimals)}  C ${formatPrice(candle.close, state.market.priceDecimals)}`, 18, 22);
-      ctx.fillStyle = "#22d3e2"; ctx.fillText(`Cursor ${formatPrice(hoverPrice, state.market.priceDecimals)}`, 18, 36);
-      if (mode === "footprint" && footprint) {
-        ctx.fillStyle = qualityColor(footprint.quality);
-        ctx.fillText(`${QUALITY_LABEL[footprint.quality]}  Bid ${volumeText(nearest?.bidVolume ?? 0)} × Ask ${volumeText(nearest?.askVolume ?? 0)}  Δ ${volumeText(footprint.delta)}  POC ${formatPrice(footprint.pocPrice, state.market.priceDecimals)}`, 18, 51);
-      }
-    }
-
     if (replayActive) {
       ctx.fillStyle = "rgba(41,31,10,.92)"; ctx.strokeStyle = "rgba(244,189,74,.45)";
       ctx.fillRect(plotWidth - 190, plotHeight - 34, 178, 24); ctx.strokeRect(plotWidth - 190, plotHeight - 34, 178, 24);
@@ -380,36 +495,52 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       ctx.fillText("RECORDED EVENT REPLAY", plotWidth - 101, plotHeight - 22);
     }
 
-    frameCount.current += 1;
-    const elapsed = performance.now() - frameStart.current;
-    if (elapsed >= 1000) {
-      onFps?.(Math.round(frameCount.current * 1000 / elapsed));
-      frameCount.current = 0; frameStart.current = performance.now();
-    }
-  }, [size, visible, state, mode, settings, replayActive, cursor, groupedBook, large, footprintByTime, onFps]);
+    renderMetaRef.current = { dpr, width, height, plotWidth, plotHeight, min, max, priceRange, xStep, displayStep, visible, footprints: displayFootprints };
+    queueOverlay();
+  }, [size, visible, state.analytics.sessionVwap, state.market.tickSize, state.market.footprintDefaultTicks, state.market.priceDecimals, mode, settings, replayActive, groupedBook, large, footprintByTime, queueOverlay]);
 
   const point = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
+
+  const queueOffset = useCallback((next: number) => {
+    pendingOffsetRef.current = next;
+    if (dragFrameRef.current !== null) return;
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      if (pendingOffsetRef.current !== null) setOffset(pendingOffsetRef.current);
+      pendingOffsetRef.current = null;
+    });
+  }, []);
+
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
-    const position = point(event); drag.current = { x: position.x, offset };
+    const position = point(event);
+    cursorRef.current = position;
+    drag.current = { x: position.x, offset };
+    queueOverlay();
   };
+
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    const position = point(event); setCursor(position);
+    const position = point(event);
+    cursorRef.current = position;
+    queueOverlay();
     if (drag.current) {
       const step = Math.max(1, (size.width - 78) / Math.max(1, visible.length));
       const delta = Math.round((drag.current.x - position.x) / step);
-      setOffset(clamp(drag.current.offset + delta, 0, Math.max(0, state.candles.length - 20)));
+      queueOffset(clamp(drag.current.offset + delta, 0, Math.max(0, state.candles.length - 20)));
     }
   };
+
   const onPointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     drag.current = null;
   };
+
   const onWheel = (event: ReactWheelEvent<HTMLCanvasElement>) => {
-    event.preventDefault(); setBars((current) => clamp(current + (event.deltaY > 0 ? 10 : -10), 10, 400));
+    event.preventDefault();
+    setBars((current) => clamp(current + (event.deltaY > 0 ? 10 : -10), 10, 400));
   };
 
   return (
@@ -420,15 +551,20 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={() => { setCursor(null); drag.current = null; }}
+        onPointerLeave={() => { cursorRef.current = null; drag.current = null; queueOverlay(); }}
         onWheel={onWheel}
         aria-label={`${state.market.displayName} ${mode} chart`}
+      />
+      <canvas
+        ref={overlayRef}
+        aria-hidden="true"
+        style={{ position: "absolute", inset: 0, pointerEvents: "none", width: "100%", height: "100%" }}
       />
       <div className="vf-chart-hud">
         <span>{visible.length} bars</span>
         <span>Zoom {bars}</span>
         {mode === "footprint" && <span>Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()}</span>}
-        <span>Large ≥ {formatNotional(large.threshold)}</span>
+        <span>Big orders ≥ {formatNotional(large.threshold)}</span>
       </div>
     </div>
   );
