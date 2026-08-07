@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "name": "BTC deterministic footprint golden session",
+  "instrument": {
+    "venue": "Binance",
+    "productType": "spot",
+    "symbol": "BTCUSDT",
+    "tickSize": 1,
+    "timeframeMs": 60000
+  },
+  "trades": [
+    { "id": "1", "exchangeTime": 1000, "receiveTime": 1005, "price": 100, "size": 2, "side": "buy", "notional": 200, "sequence": 1, "source": "replay" },
+    { "id": "2", "exchangeTime": 2000, "receiveTime": 2005, "price": 100, "size": 1, "side": "sell", "notional": 100, "sequence": 2, "source": "replay" },
+    { "id": "3", "exchangeTime": 3000, "receiveTime": 3005, "price": 101, "size": 3, "side": "buy", "notional": 303, "sequence": 3, "source": "replay" },
+    { "id": "4", "exchangeTime": 61000, "receiveTime": 61005, "price": 102, "size": 4, "side": "sell", "notional": 408, "sequence": 4, "source": "replay" }
+  ],
+  "expected": {
+    "footprintCount": 2,
+    "totalVolume": 10,
+    "totalDelta": 0,
+    "firstCandleVolume": 6,
+    "firstCandleDelta": 4,
+    "firstCandlePoc": 101,
+    "secondCandleVolume": 4,
+    "secondCandleDelta": -4
+  }
+}

@@ -4,6 +4,7 @@ import { MarketChart } from "./Chart";
 import { formatCompact, formatNotional, formatPrice, formatTime } from "./format";
 import { MARKETS, TIMEFRAMES } from "./markets";
 import { groupBook } from "./orderBook";
+import { PlatformDrawer } from "./PlatformDrawer";
 import type { ChartMode, DataQuality, FootprintQuality, MarketKey, MarketState, Timeframe } from "./types";
 import { useMarketEngine } from "./useMarketEngine";
 import "./worldclass.css";
@@ -20,6 +21,9 @@ interface Settings {
   footprintImbalanceRatio: number;
   footprintMinVolume: number;
   density: "compact" | "comfortable";
+  layout: "single" | "dual";
+  palette: "default" | "deuteranopia" | "protanopia" | "tritanopia" | "high-contrast";
+  textScale: number;
 }
 
 type BooleanSetting = "showGrid" | "showVolume" | "showVwap" | "showDepth" | "showLargeTrades" | "autoFollow" | "showFootprintDelta";
@@ -36,6 +40,9 @@ const DEFAULT_SETTINGS: Settings = {
   footprintImbalanceRatio: 3,
   footprintMinVolume: 0.05,
   density: "compact",
+  layout: "single",
+  palette: "default",
+  textScale: 1,
 };
 
 function useStoredState<T>(key: string, fallback: T): [T, (value: T | ((current: T) => T)) => void] {
@@ -54,7 +61,8 @@ function useStoredState<T>(key: string, fallback: T): [T, (value: T | ((current:
 }
 
 function QualityBadge({ quality, text }: { quality: DataQuality; text?: string }) {
-  return <span className={`vf-quality vf-quality-${quality}`}>{text ?? quality.replace("-", " ")}</span>;
+  const label = text ?? quality.replace("-", " ");
+  return <span className={`vf-quality vf-quality-${quality}`} role="status" aria-label={`Data quality ${label}`}>{label}</span>;
 }
 
 function footprintDataQuality(quality: FootprintQuality): DataQuality {
@@ -72,7 +80,7 @@ function marketProductText(state: MarketState): string {
 
 function ConnectionChip({ state }: { state: MarketState }) {
   return (
-    <div className={`vf-connection vf-connection-${state.status}`} title={state.statusDetail}>
+    <div className={`vf-connection vf-connection-${state.status}`} title={state.statusDetail} role="status" aria-live="polite">
       <i />
       <span>{state.status}</span>
       <small>{state.statusDetail}</small>
@@ -98,9 +106,9 @@ function OrderBookPanel({ state, collapsed, onToggle }: { state: MarketState; co
   const bestBid = book?.bids[0]; const bestAsk = book?.asks[0];
   const spread = bestBid && bestAsk ? bestAsk.price - bestBid.price : undefined;
   return (
-    <section className={`vf-panel ${collapsed ? "vf-collapsed" : ""}`}>
+    <section className={`vf-panel ${collapsed ? "vf-collapsed" : ""}`} aria-labelledby="vf-book-title">
       <header onDoubleClick={onToggle}>
-        <div><small>SEQUENCE-AWARE DEPTH</small><h2>Order Book</h2></div>
+        <div><small>SEQUENCE-AWARE DEPTH</small><h2 id="vf-book-title">Order Book</h2></div>
         <QualityBadge quality={state.book?.quality ?? "unavailable"} text={state.book?.sequence ? `SYNC ${state.book.sequence}` : undefined} />
         <button type="button" onClick={onToggle} aria-label={collapsed ? "Expand order book" : "Collapse order book"}>{collapsed ? "+" : "−"}</button>
       </header>
@@ -136,11 +144,11 @@ function OrderBookPanel({ state, collapsed, onToggle }: { state: MarketState; co
 function LargePrintsPanel({ state, collapsed, onToggle }: { state: MarketState; collapsed: boolean; onToggle: () => void }) {
   const result = useMemo(() => detectLargeTrades(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000), [state.trades, state.market.key]);
   return (
-    <section className={`vf-panel ${collapsed ? "vf-collapsed" : ""}`}>
+    <section className={`vf-panel ${collapsed ? "vf-collapsed" : ""}`} aria-labelledby="vf-prints-title">
       <header onDoubleClick={onToggle}>
-        <div><small>STATISTICAL OUTLIERS</small><h2>Large Prints</h2></div>
+        <div><small>STATISTICAL OUTLIERS</small><h2 id="vf-prints-title">Large Prints</h2></div>
         <span className="vf-threshold">≥ {formatNotional(result.threshold)}</span>
-        <button type="button" onClick={onToggle}>{collapsed ? "+" : "−"}</button>
+        <button type="button" onClick={onToggle} aria-label={collapsed ? "Expand large prints" : "Collapse large prints"}>{collapsed ? "+" : "−"}</button>
       </header>
       {!collapsed && <div className="vf-print-list">
         {!result.events.length && <div className="vf-empty">No statistically unusual prints in the current sample. Quiet tape is allowed to be quiet.</div>}
@@ -160,11 +168,11 @@ function LargePrintsPanel({ state, collapsed, onToggle }: { state: MarketState; 
 
 function TapePanel({ state, collapsed, onToggle }: { state: MarketState; collapsed: boolean; onToggle: () => void }) {
   return (
-    <section className={`vf-panel ${collapsed ? "vf-collapsed" : ""}`}>
+    <section className={`vf-panel ${collapsed ? "vf-collapsed" : ""}`} aria-labelledby="vf-tape-title">
       <header onDoubleClick={onToggle}>
-        <div><small>AGGRESSOR-CLASSIFIED</small><h2>Time & Sales</h2></div>
+        <div><small>AGGRESSOR-CLASSIFIED</small><h2 id="vf-tape-title">Time & Sales</h2></div>
         <span className="vf-count">{state.trades.length}</span>
-        <button type="button" onClick={onToggle}>{collapsed ? "+" : "−"}</button>
+        <button type="button" onClick={onToggle} aria-label={collapsed ? "Expand time and sales" : "Collapse time and sales"}>{collapsed ? "+" : "−"}</button>
       </header>
       {!collapsed && <>
         <div className="vf-tape-head"><span>Time</span><span>Price</span><span>Size</span></div>
@@ -186,7 +194,7 @@ function ReplayBar({ engine }: { engine: ReturnType<typeof useMarketEngine> }) {
   const active = engine.replay.mode === "events";
   return (
     <div className={`vf-replaybar ${active ? "vf-active" : ""}`}>
-      <div className="vf-replay-title"><b>{active ? "EVENT REPLAY" : "SESSION RECORDER"}</b><small>{active ? `${engine.replay.events.length.toLocaleString()} normalized events` : "Recording candles, trades, footprints, books and metrics"}</small></div>
+      <div className="vf-replay-title"><b>{active ? "EVENT REPLAY" : "SESSION RECORDER"}</b><small>{active ? `${engine.replay.events.length.toLocaleString()} normalized events` : "Autosaving candles, trades, footprints, books and metrics"}</small></div>
       {!active ? <button type="button" onClick={engine.enterReplay}>Open Replay</button> : <>
         <button type="button" onClick={engine.toggleReplay}>{engine.replay.playing ? "Pause" : "Play"}</button>
         <button type="button" onClick={() => engine.setReplayCursor(Math.max(0, engine.replay.cursor - 1))}>Step −</button>
@@ -206,8 +214,8 @@ function ReplayBar({ engine }: { engine: ReturnType<typeof useMarketEngine> }) {
 function SettingsDrawer({ settings, setSettings, onClose }: { settings: Settings; setSettings: (value: Settings | ((current: Settings) => Settings)) => void; onClose: () => void }) {
   const toggle = (key: BooleanSetting) => setSettings((current) => ({ ...current, [key]: !current[key] }));
   return <div className="vf-drawer-backdrop" onMouseDown={(event: ReactMouseEvent<HTMLDivElement>) => event.target === event.currentTarget && onClose()}>
-    <aside className="vf-settings-drawer">
-      <header><div><small>WORKSPACE</small><h2>Display & Footprint</h2></div><button type="button" onClick={onClose}>×</button></header>
+    <aside className="vf-settings-drawer" role="dialog" aria-modal="true" aria-labelledby="vf-settings-title">
+      <header><div><small>WORKSPACE</small><h2 id="vf-settings-title">Display, accessibility, and footprint</h2></div><button type="button" onClick={onClose} aria-label="Close settings">×</button></header>
       {([
         ["showGrid", "Chart grid", "Reference lines for price and time"],
         ["showVolume", "Volume profile strip", "Per-candle base volume"],
@@ -217,6 +225,9 @@ function SettingsDrawer({ settings, setSettings, onClose }: { settings: Settings
         ["showFootprintDelta", "Footprint candle delta", "Show ask-minus-bid volume under each footprint"],
         ["autoFollow", "Auto follow", "Keep latest bar in view while live"],
       ] as const).map(([key, label, detail]) => <button className="vf-setting-row" type="button" key={key} onClick={() => toggle(key)}><span><b>{label}</b><small>{detail}</small></span><i className={settings[key] ? "vf-on" : ""}><span /></i></button>)}
+      <div className="vf-density"><span><b>Workspace layout</b><small>Single or synchronized dual-chart panel</small></span><select value={settings.layout} onChange={(event: ChangeEvent<HTMLSelectElement>) => setSettings((current) => ({ ...current, layout: event.target.value as Settings["layout"] }))}><option value="single">Single</option><option value="dual">Dual synchronized</option></select></div>
+      <div className="vf-density"><span><b>Color palette</b><small>Accessible buy, sell, warning, and quality states</small></span><select value={settings.palette} onChange={(event: ChangeEvent<HTMLSelectElement>) => setSettings((current) => ({ ...current, palette: event.target.value as Settings["palette"] }))}><option value="default">Default</option><option value="deuteranopia">Deuteranopia</option><option value="protanopia">Protanopia</option><option value="tritanopia">Tritanopia</option><option value="high-contrast">High contrast</option></select></div>
+      <div className="vf-density"><span><b>Text scale</b><small>Scales terminal labels without changing calculations</small></span><select value={settings.textScale} onChange={(event: ChangeEvent<HTMLSelectElement>) => setSettings((current) => ({ ...current, textScale: Number(event.target.value) }))}><option value="0.9">90%</option><option value="1">100%</option><option value="1.15">115%</option><option value="1.3">130%</option></select></div>
       <div className="vf-density"><span><b>Footprint row grouping</b><small>Minimum exchange ticks per displayed row; chart may group further when zoomed out</small></span><select value={settings.footprintTicksPerRow} onChange={(event: ChangeEvent<HTMLSelectElement>) => setSettings((current) => ({ ...current, footprintTicksPerRow: Number(event.target.value) }))}><option value="1">1 tick</option><option value="5">5 ticks</option><option value="10">10 ticks</option><option value="25">25 ticks</option><option value="50">50 ticks</option></select></div>
       <div className="vf-density"><span><b>Diagonal imbalance</b><small>Ask versus bid one row lower; bid versus ask one row higher</small></span><select value={settings.footprintImbalanceRatio} onChange={(event: ChangeEvent<HTMLSelectElement>) => setSettings((current) => ({ ...current, footprintImbalanceRatio: Number(event.target.value) }))}><option value="2">200%</option><option value="3">300%</option><option value="4">400%</option><option value="5">500%</option></select></div>
       <div className="vf-density"><span><b>Minimum imbalance volume</b><small>Suppress ratios caused by tiny prints</small></span><select value={settings.footprintMinVolume} onChange={(event: ChangeEvent<HTMLSelectElement>) => setSettings((current) => ({ ...current, footprintMinVolume: Number(event.target.value) }))}><option value="0">No minimum</option><option value="0.01">0.01</option><option value="0.05">0.05</option><option value="0.1">0.10</option><option value="0.5">0.50</option><option value="1">1.00</option></select></div>
@@ -230,10 +241,11 @@ function SettingsDrawer({ settings, setSettings, onClose }: { settings: Settings
 export default function WorldclassApp() {
   const engine = useMarketEngine();
   const [mode, setMode] = useStoredState<ChartMode>("vf-chart-mode", "candles");
-  const [settings, setSettings] = useStoredState<Settings>("vf-settings-v5", DEFAULT_SETTINGS);
+  const [settings, setSettings] = useStoredState<Settings>("vf-settings-v6", DEFAULT_SETTINGS);
   const [sidebarWidth, setSidebarWidth] = useStoredState<number>("vf-sidebar-width", 360);
   const [collapsed, setCollapsed] = useStoredState<Record<string, boolean>>("vf-panels", { book: false, prints: false, tape: false });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [platformOpen, setPlatformOpen] = useState(false);
   const [fps, setFps] = useState(0);
   const resizeRef = useRef<{ x: number; width: number } | null>(null);
 
@@ -256,32 +268,41 @@ export default function WorldclassApp() {
     const keyboard = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement)?.matches("input,select,textarea")) return;
       if (event.key.toLowerCase() === "r") engine.replay.mode === "live" ? engine.enterReplay() : engine.exitReplay();
+      if (event.key.toLowerCase() === "p") setPlatformOpen((current) => !current);
+      if (event.key.toLowerCase() === "s") setSettingsOpen((current) => !current);
       if (event.code === "Space" && engine.replay.mode === "events") { event.preventDefault(); engine.toggleReplay(); }
       if (event.key === "1") setMode("candles");
       if (event.key === "2") setMode("footprint");
       if (event.key === "3") setMode("delta");
+      if (event.key === "Escape") { setPlatformOpen(false); setSettingsOpen(false); }
     };
     window.addEventListener("keydown", keyboard);
     return () => window.removeEventListener("keydown", keyboard);
   }, [engine, setMode]);
 
+  useEffect(() => {
+    if (fps > 0) engine.telemetry.record({ kind: "chart-fps", market: engine.state.market.key, venue: engine.state.market.venue, value: fps, unit: "fps" });
+  }, [engine.state.market.key, engine.state.market.venue, engine.telemetry, fps]);
+
   const price = engine.state.metrics.markPrice ?? engine.state.candles.at(-1)?.close;
   const first = engine.state.candles[0]?.open;
   const change = price !== undefined && first ? (price - first) / first * 100 : undefined;
   const replayActive = engine.replay.mode === "events";
-  const rootStyle = { "--vf-sidebar": `${sidebarWidth}px` } as CSSProperties;
+  const rootStyle = { "--vf-sidebar": `${sidebarWidth}px`, "--vf-text-scale": settings.textScale } as CSSProperties;
   const footprintQuality = footprintDataQuality(engine.state.footprintCoverage.quality);
   const fullFootprints = engine.state.footprints.filter((item) => item.quality === "full" || item.quality === "replay-full").length;
+  const secondaryMode: ChartMode = mode === "footprint" ? "delta" : "footprint";
 
   return (
-    <div className={`vf-app vf-density-${settings.density} ${replayActive ? "vf-replay-mode" : ""}`} style={rootStyle}>
+    <div className={`vf-app vf-density-${settings.density} vf-palette-${settings.palette} ${replayActive ? "vf-replay-mode" : ""}`} style={rootStyle}>
       <header className="vf-topbar">
-        <div className="vf-brand"><span>V</span><div><b>VEILFLOW</b><small>ORDER FLOW INTELLIGENCE</small></div></div>
-        <nav><button className="vf-active">Workspace</button><button onClick={engine.enterReplay}>Replay</button></nav>
+        <div className="vf-brand"><span>V</span><div><b>VEILFLOW</b><small>CRYPTO MARKET MICROSTRUCTURE</small></div></div>
+        <nav aria-label="Primary"><button className={!platformOpen ? "vf-active" : ""} onClick={() => setPlatformOpen(false)}>Workspace</button><button onClick={engine.enterReplay}>Replay</button><button className={platformOpen ? "vf-active" : ""} onClick={() => setPlatformOpen(true)}>Research</button></nav>
         <div className="vf-top-actions">
           <ConnectionChip state={engine.liveState} />
-          <button type="button" onClick={engine.refresh} title="Reconnect and refresh">↻</button>
-          <button type="button" onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
+          <button type="button" onClick={engine.refresh} title="Reconnect and refresh" aria-label="Reconnect and refresh">↻</button>
+          <button type="button" onClick={() => setPlatformOpen(true)} title="Platform trust inspector" aria-label="Open platform trust inspector">◎</button>
+          <button type="button" onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Open settings">⚙</button>
         </div>
       </header>
 
@@ -304,7 +325,10 @@ export default function WorldclassApp() {
             <div className="vf-price"><strong>{formatPrice(price, engine.state.market.priceDecimals)}</strong><span className={change !== undefined && change >= 0 ? "vf-positive" : "vf-negative"}>{change === undefined ? "—" : `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`}</span></div>
             <div className="vf-market-meta"><span>Mark<b>{formatPrice(engine.state.metrics.markPrice, engine.state.market.priceDecimals)}</b></span><span>Index/Oracle<b>{formatPrice(engine.state.metrics.oraclePrice, engine.state.market.priceDecimals)}</b></span><span>Funding<b>{engine.state.metrics.fundingRate === undefined ? "—" : `${(engine.state.metrics.fundingRate * 100).toFixed(4)}%`}</b></span><span>OI<b>{formatCompact(engine.state.metrics.openInterest)}</b></span><span>24h volume<b>{formatCompact(engine.state.metrics.dayVolume)} {engine.state.metrics.dayVolumeUnit === "base" ? engine.state.market.quantityUnit : "USD"}</b></span></div>
           </header>
-          <MarketChart state={engine.state} mode={mode} settings={settings} replayActive={replayActive} onFps={setFps} />
+          <div className={`vf-chart-grid vf-chart-grid-${settings.layout}`}>
+            <div className="vf-chart-panel" aria-label={`Primary ${mode} chart`}><span className="vf-chart-panel-label">PRIMARY · {mode.toUpperCase()}</span><MarketChart state={engine.state} mode={mode} settings={settings} replayActive={replayActive} onFps={setFps} /></div>
+            {settings.layout === "dual" && <div className="vf-chart-panel" aria-label={`Synchronized ${secondaryMode} chart`}><span className="vf-chart-panel-label">SYNC · {secondaryMode.toUpperCase()}</span><MarketChart state={engine.state} mode={secondaryMode} settings={settings} replayActive={replayActive} onFps={() => undefined} /></div>}
+          </div>
           <div className="vf-metrics">
             <MetricCard label="Footprint Coverage" value={`${fullFootprints} full`} detail={`${engine.state.footprintCoverage.eventCount.toLocaleString()} price-level trade events · ${engine.state.footprintCoverage.detail}`} tone={engine.state.footprintCoverage.quality === "gapped" ? "warning" : undefined} />
             <MetricCard label="Session VWAP" value={formatPrice(engine.state.analytics.sessionVwap, engine.state.market.priceDecimals)} detail="UTC session · zoom invariant" />
@@ -323,8 +347,9 @@ export default function WorldclassApp() {
         </aside>
       </main>
 
-      <footer className="vf-statusbar"><span><i className={`vf-status-${engine.state.status}`} />{engine.state.statusDetail}</span><span>Exchange time {engine.state.lastEventAt ? formatTime(engine.state.lastEventAt, true) : "—"}</span><span>Footprint {engine.state.footprintCoverage.quality}</span><span>Events {engine.state.eventRate}/s</span><span>Lag {engine.state.eventLagMs.toFixed(0)}ms</span><span>Renderer {fps} FPS</span><span>Shortcuts: 1/2/3 chart · R replay · Space play/pause</span></footer>
+      <footer className="vf-statusbar"><span><i className={`vf-status-${engine.state.status}`} />{engine.state.statusDetail}</span><span>Exchange time {engine.state.lastEventAt ? formatTime(engine.state.lastEventAt, true) : "—"}</span><span>Footprint {engine.state.footprintCoverage.quality}</span><span>Events {engine.state.eventRate}/s</span><span>Lag {engine.state.eventLagMs.toFixed(0)}ms</span><span>Renderer {fps} FPS</span><span>Shortcuts: 1/2/3 chart · R replay · P research · S settings · Space play/pause</span></footer>
       {settingsOpen && <SettingsDrawer settings={settings} setSettings={setSettings} onClose={() => setSettingsOpen(false)} />}
+      {platformOpen && <PlatformDrawer engine={engine} onClose={() => setPlatformOpen(false)} />}
     </div>
   );
 }

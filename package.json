@@ -1,26 +1,33 @@
 {
   "name": "veilflow-orderflow",
   "private": true,
-  "version": "1.1.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "npm run typecheck && npm test && vite build",
+    "test:collector": "node --test services/collector/test/*.test.mjs",
+    "test:all": "npm test && npm run test:collector",
+    "test:e2e": "playwright test",
+    "build": "npm run typecheck && npm run test:all && vite build",
     "test:watch": "vitest",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "collector": "node services/collector/runtime.mjs",
+    "collector:api": "node services/collector/api.mjs",
+    "collector:gateway": "node services/collector/gateway.mjs"
   },
   "dependencies": {
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
     "typescript": "5.9.3",
-    "vite": "7.3.2",
-    "vitest": "3.2.4"
+    "vite": "7.3.6",
+    "vitest": "3.2.7"
   }
 }

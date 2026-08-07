@@ -5,19 +5,68 @@ on:
   push:
     branches: [master]
 
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --no-audit --no-fund
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+          cache: npm
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: TypeScript
+        run: npm run typecheck
+      - name: Unit and golden tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Verify immutable build metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const meta = JSON.parse(await readFile("dist/build-meta.json", "utf8"));
+          if (!meta.gitSha || !meta.gitRef || !meta.builtAt) throw new Error("Incomplete build-meta.json");
+          if (process.env.GITHUB_SHA && meta.gitSha !== process.env.GITHUB_SHA) {
+            throw new Error(`Build SHA mismatch: ${meta.gitSha} != ${process.env.GITHUB_SHA}`);
+          }
+          NODE
+      - name: Enforce JavaScript bundle limit
+        run: |
+          node --input-type=module <<'NODE'
+          import { readdir, stat } from "node:fs/promises";
+          const files = await readdir("dist/assets");
+          let bytes = 0;
+          for (const file of files.filter((name) => name.endsWith(".js"))) bytes += (await stat(`dist/assets/${file}`)).size;
+          const limit = 1_500_000;
+          if (bytes > limit) throw new Error(`JavaScript bundle ${bytes} bytes exceeds ${limit}`);
+          console.log(`JavaScript bundle: ${bytes} bytes`);
+          NODE
+      - name: Reject runtime application CDN scripts
+        run: |
+          if grep -E '<script[^>]+src="https?://' dist/index.html; then
+            echo "Runtime CDN script dependency detected"
+            exit 1
+          fi
+      - name: Production artifact HTTP smoke test
+        run: |
+          npm run preview -- --host 127.0.0.1 --port 4173 > /tmp/veilflow-preview.log 2>&1 &
+          preview_pid=$!
+          trap 'kill "$preview_pid" || true; cat /tmp/veilflow-preview.log' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:4173/ >/tmp/veilflow-index.html; then break; fi
+            sleep 1
+          done
+          grep -q 'id="root"' /tmp/veilflow-index.html
+          curl --fail --silent http://127.0.0.1:4173/build-meta.json | grep -q 'gitSha'
+      - name: Dependency vulnerability audit
+        run: npm audit --audit-level=high
