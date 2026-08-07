@@ -34,7 +34,7 @@ test("local book deletes zero levels and never remains crossed", () => {
   const book = new LocalBook();
   book.snapshot({ bids: [[100, 2], [99, 1]], asks: [[101, 2], [102, 1]] }, 1);
   const updated = book.update({ bids: [[100, 0], [102, 1]], asks: [[101, 1]] }, 2);
-  assert.equal(updated.bids.some(([price]) => price === 100), false);
+  assert.equal(updated.bids.some((level) => level.price === 100), false);
   assert.ok(!updated.bids[0] || !updated.asks[0] || updated.bids[0].price < updated.asks[0].price);
 });
 
