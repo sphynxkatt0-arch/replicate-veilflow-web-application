@@ -29,7 +29,12 @@ const EMPTY_FOOTPRINT = {
 };
 const STALE_AFTER_MS = 8_000;
 const STALE_CHECK_MS = 250;
-const AUTOSAVE_MS = 5_000;
+const UI_FLUSH_MS = 50;
+const ANALYTICS_INTERVAL_MS = 250;
+const AUTOSAVE_MS = 30_000;
+const AUTOSAVE_IDLE_TIMEOUT_MS = 2_500;
+const MAX_LIVE_TRADES = 25_000;
+const TRADE_TRIM_BATCH = 2_000;
 
 interface PendingReplay {
   raw: string;
@@ -67,6 +72,13 @@ function initialState(marketKey: MarketKey, timeframe: Timeframe): MarketState {
 }
 
 function mergeCandle(candles: Candle[], candle: Candle): Candle[] {
+  const last = candles.at(-1);
+  if (last?.time === candle.time) {
+    const next = candles.slice();
+    next[next.length - 1] = candle;
+    return next;
+  }
+  if (!last || candle.time > last.time) return [...candles, candle].slice(-5000);
   const index = candles.findIndex((item) => item.time === candle.time);
   if (index >= 0) {
     const next = candles.slice();
@@ -85,7 +97,25 @@ function mergeCandles(left: Candle[], right: Candle[]): Candle[] {
 function mergeTrades(left: Trade[], right: Trade[]): Trade[] {
   const map = new Map<string, Trade>();
   for (const trade of [...left, ...right]) map.set(trade.id, trade);
-  return [...map.values()].sort((a, b) => a.exchangeTime - b.exchangeTime || (a.sequence ?? 0) - (b.sequence ?? 0)).slice(-25_000);
+  return [...map.values()].sort((a, b) => a.exchangeTime - b.exchangeTime || (a.sequence ?? 0) - (b.sequence ?? 0)).slice(-MAX_LIVE_TRADES);
+}
+
+export function appendLiveTrade(trades: Trade[], seen: Set<string>, trade: Trade): boolean {
+  if (seen.has(trade.id)) return false;
+  seen.add(trade.id);
+  trades.push(trade);
+  if (trades.length > MAX_LIVE_TRADES + TRADE_TRIM_BATCH) {
+    const removed = trades.splice(0, trades.length - MAX_LIVE_TRADES);
+    for (const item of removed) seen.delete(item.id);
+  }
+  return true;
+}
+
+function latestSequence(trades: Trade[]): number | undefined {
+  for (let index = trades.length - 1; index >= 0; index -= 1) {
+    if (trades[index].sequence !== undefined) return trades[index].sequence;
+  }
+  return undefined;
 }
 
 function eventId(type: string, time: number, suffix = ""): string {
@@ -143,6 +173,12 @@ export function useMarketEngine(): EngineApi {
   const pendingReplayRef = useRef<PendingReplay | null>(null);
   const telemetryRef = useRef(new TelemetryBuffer(10_000));
   const staleStartedRef = useRef<number | null>(null);
+  const tradeIdsRef = useRef(new Set<string>());
+  const lastSequenceRef = useRef<number | undefined>(undefined);
+  const lastFlushAtRef = useRef(0);
+  const lastAnalyticsAtRef = useRef(0);
+  const autosaveInFlightRef = useRef(false);
+  const lastAutosavedCountRef = useRef(0);
 
   const refreshSessions = useCallback(async () => {
     setSessions(await sessionStoreRef.current.list());
@@ -150,14 +186,21 @@ export function useMarketEngine(): EngineApi {
 
   const flush = useCallback(() => {
     if (flushTimerRef.current !== null) return;
+    const elapsed = performance.now() - lastFlushAtRef.current;
+    const delay = Math.max(0, UI_FLUSH_MS - elapsed);
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
       const model = modelRef.current;
       const footprint = footprintRef.current.snapshot();
       model.footprints = footprint.footprints;
       model.footprintCoverage = footprint.coverage;
-      model.analytics = calculateAnalytics(model.candles, model.trades, model.book, model.market.quality);
+      const now = performance.now();
+      if (now - lastAnalyticsAtRef.current >= ANALYTICS_INTERVAL_MS) {
+        model.analytics = calculateAnalytics(model.candles, model.trades, model.book, model.market.quality);
+        lastAnalyticsAtRef.current = now;
+      }
       model.eventRate = rateRef.current;
+      lastFlushAtRef.current = now;
       setLiveState({
         ...model,
         candles: model.candles.slice(),
@@ -166,7 +209,7 @@ export function useMarketEngine(): EngineApi {
         footprintCoverage: { ...model.footprintCoverage },
         analytics: { ...model.analytics },
       });
-    }, 80);
+    }, delay);
   }, []);
 
   useEffect(() => { void refreshSessions(); }, [refreshSessions]);
@@ -205,6 +248,10 @@ export function useMarketEngine(): EngineApi {
     setLiveState(next);
     footprintRef.current = new FootprintAccumulator(market, timeframe);
     recorderRef.current.reset(marketKey);
+    tradeIdsRef.current.clear();
+    lastSequenceRef.current = undefined;
+    lastAnalyticsAtRef.current = 0;
+    lastAutosavedCountRef.current = 0;
     setReplay({ mode: "live", playing: false, speed: 1, cursor: 0, events: [] });
 
     const record = (event: NormalizedEvent) => {
@@ -241,6 +288,8 @@ export function useMarketEngine(): EngineApi {
       const model = modelRef.current;
       model.candles = mergeCandles(snapshot.candles, model.candles);
       model.trades = mergeTrades(snapshot.trades, model.trades);
+      tradeIdsRef.current = new Set(model.trades.map((trade) => trade.id));
+      lastSequenceRef.current = latestSequence(model.trades);
       model.book = snapshot.book ?? model.book;
       model.metrics = snapshot.metrics;
       model.status = "syncing";
@@ -258,6 +307,8 @@ export function useMarketEngine(): EngineApi {
       for (const trade of snapshot.trades) record({ id: eventId("trade", trade.exchangeTime, trade.id), type: "trade", market: marketKey, exchangeTime: trade.exchangeTime, receiveTime: trade.receiveTime, payload: trade });
       if (snapshot.book) record({ id: eventId("book", snapshot.book.exchangeTime, String(snapshot.book.sequence ?? "")), type: "book", market: marketKey, exchangeTime: snapshot.book.exchangeTime, receiveTime: snapshot.book.receiveTime, payload: snapshot.book });
       record({ id: eventId("metrics", snapshot.metrics.timestamp), type: "metrics", market: marketKey, exchangeTime: snapshot.metrics.timestamp, receiveTime: Date.now(), payload: snapshot.metrics });
+      model.analytics = calculateAnalytics(model.candles, model.trades, model.book, model.market.quality);
+      lastAnalyticsAtRef.current = performance.now();
       flush();
     }).catch((error) => {
       if (!abort.signal.aborted) status("error", error instanceof Error ? error.message : "Snapshot load failed");
@@ -274,16 +325,16 @@ export function useMarketEngine(): EngineApi {
       },
       onTrade: (trade: Trade) => {
         const model = modelRef.current;
-        if (model.trades.some((item) => item.id === trade.id)) return;
+        if (!appendLiveTrade(model.trades, tradeIdsRef.current, trade)) return;
         if (market.provider === "Binance" && trade.sequence !== undefined) {
-          const previous = [...model.trades].reverse().find((item) => item.sequence !== undefined)?.sequence;
+          const previous = lastSequenceRef.current;
           if (previous !== undefined && trade.sequence > previous + 1) {
             const detail = `Aggregate-trade gap: expected ${previous + 1}, received ${trade.sequence}`;
             footprintRef.current.markGap(trade.exchangeTime, detail);
             telemetryRef.current.record({ kind: "sequence-gap", market: marketKey, venue: market.venue, detail });
           }
+          if (previous === undefined || trade.sequence > previous) lastSequenceRef.current = trade.sequence;
         }
-        model.trades = mergeTrades(model.trades, [trade]);
         footprintRef.current.ingestTrade(trade);
         touch(trade.exchangeTime);
         record({ id: eventId("trade", trade.exchangeTime, trade.id), type: "trade", market: marketKey, exchangeTime: trade.exchangeTime, receiveTime: trade.receiveTime, payload: trade });
@@ -331,17 +382,35 @@ export function useMarketEngine(): EngineApi {
   }, [marketKey, timeframe, refreshNonce, flush]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
+    let disposed = false;
+    const persist = () => {
+      if (disposed || replay.mode !== "live" || autosaveInFlightRef.current) return;
+      const eventCount = recorderRef.current.eventCount;
+      if (!eventCount || eventCount === lastAutosavedCountRef.current) return;
+      autosaveInFlightRef.current = true;
       const events = recorderRef.current.snapshot();
-      if (!events.length || replay.mode !== "live") return;
       const session = createStoredSession(`Autosave · ${MARKETS[marketKey].displayName} · ${timeframe}`, MARKETS[marketKey], timeframe, events, captureStartedAtRef.current);
       session.id = `autosave-${marketKey}-${timeframe}`;
       session.updatedAt = Date.now();
-      void sessionStoreRef.current.put(session).then(refreshSessions).catch((error) => {
+      void sessionStoreRef.current.put(session).then(async () => {
+        lastAutosavedCountRef.current = eventCount;
+        await refreshSessions();
+      }).catch((error) => {
         telemetryRef.current.record({ kind: "api-failure", market: marketKey, venue: MARKETS[marketKey].venue, detail: `Session autosave failed: ${error instanceof Error ? error.message : String(error)}` });
+      }).finally(() => {
+        autosaveInFlightRef.current = false;
       });
-    }, AUTOSAVE_MS);
-    return () => window.clearInterval(timer);
+    };
+    const schedulePersist = () => {
+      const idleWindow = window as Window & { requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number };
+      if (typeof idleWindow.requestIdleCallback === "function") idleWindow.requestIdleCallback(() => persist(), { timeout: AUTOSAVE_IDLE_TIMEOUT_MS });
+      else window.setTimeout(persist, 0);
+    };
+    const timer = window.setInterval(schedulePersist, AUTOSAVE_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
   }, [marketKey, timeframe, replay.mode, refreshSessions]);
 
   useEffect(() => {
