@@ -49,6 +49,7 @@ describe("replay archive integrity", () => {
     expect(left).toEqual(right);
     expect(left.eventCount).toBe(2);
     expect(left.eventHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(left.manifestHash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(() => validateReplayArchive(left)).not.toThrow();
   });
 
@@ -58,7 +59,14 @@ describe("replay archive integrity", () => {
     const first = corrupted.events[0];
     if (first.type !== "trade") throw new Error("fixture error");
     first.payload.price = 999;
-    expect(() => validateReplayArchive(corrupted)).toThrow(/integrity hash mismatch/);
+    expect(() => validateReplayArchive(corrupted)).toThrow(/event integrity hash mismatch/);
+  });
+
+  it("rejects modified venue or instrument metadata", () => {
+    const archive = createReplayArchive(MARKETS.BTC, "1m", EVENTS, 5_000);
+    const corrupted = structuredClone(archive) as ReplayArchiveV3;
+    corrupted.market = { ...corrupted.market, venue: "Untrusted venue" };
+    expect(() => validateReplayArchive(corrupted)).toThrow(/manifest integrity hash mismatch/);
   });
 
   it("round-trips v3 archives and remains backward compatible", () => {
