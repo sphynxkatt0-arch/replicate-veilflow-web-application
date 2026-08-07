@@ -16,8 +16,8 @@ export default defineConfig({
   projects: [
     { name: "desktop-chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 1000 } } },
     { name: "laptop-chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
-    { name: "tablet-chromium", use: { ...devices["iPad Pro 11"] } },
-    { name: "mobile-chromium", use: { ...devices["iPhone 15 Pro"] } },
+    { name: "tablet-chromium", use: { ...devices["iPad Pro 11"], browserName: "chromium" } },
+    { name: "mobile-chromium", use: { ...devices["iPhone 15 Pro"], browserName: "chromium" } },
   ],
   webServer: process.env.VEILFLOW_BASE_URL ? undefined : {
     command: "npm run preview -- --host 127.0.0.1 --port 4173",
