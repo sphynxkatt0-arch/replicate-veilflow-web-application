@@ -69,6 +69,12 @@ function manifestFromArchive(archive: ReplayArchiveV3): ReplayManifest {
   };
 }
 
+function singleMarket(events: NormalizedEvent[]): string | undefined {
+  const markets = new Set(events.map((event) => event.market));
+  if (markets.size > 1) throw new Error("Replay archive contains mixed instruments");
+  return events[0]?.market;
+}
+
 export function createReplayArchive(
   market: MarketDefinition,
   timeframe: string,
@@ -76,6 +82,10 @@ export function createReplayArchive(
   createdAt = Date.now(),
 ): ReplayArchiveV3 {
   const snapshot = events.slice(-MAX_EVENTS);
+  const eventMarket = singleMarket(snapshot);
+  if (eventMarket !== undefined && eventMarket !== market.key) {
+    throw new Error(`Replay events are ${eventMarket}, but manifest is ${market.key}`);
+  }
   const manifest: ReplayManifest = {
     format: REPLAY_FORMAT,
     schemaVersion: 3,
@@ -111,6 +121,10 @@ export function validateReplayArchive(archive: ReplayArchiveV3): void {
   }
   if (archive.eventHash !== integrityHash(archive.events)) {
     throw new Error("Replay event integrity hash mismatch");
+  }
+  const eventMarket = singleMarket(archive.events);
+  if (eventMarket !== undefined && eventMarket !== archive.market.key) {
+    throw new Error(`Replay instrument mismatch: events ${eventMarket}, manifest ${archive.market.key}`);
   }
 
   const expectedCheckpoints = buildCheckpoints(archive.events);
@@ -168,9 +182,11 @@ export class EventRecorder {
       throw new Error("Unsupported VeilFlow replay file");
     }
 
-    this.events = (parsed.events ?? [])
+    const events = (parsed.events ?? [])
       .filter((event) => event && typeof event === "object" && typeof event.type === "string")
       .slice(-MAX_EVENTS);
+    singleMarket(events);
+    this.events = events;
     this.marketKey = this.events[0]?.market ?? null;
     return this.snapshot();
   }
