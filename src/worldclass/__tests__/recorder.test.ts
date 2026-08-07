@@ -69,6 +69,15 @@ describe("replay archive integrity", () => {
     expect(() => validateReplayArchive(corrupted)).toThrow(/manifest integrity hash mismatch/);
   });
 
+  it("rejects mixed-instrument event streams", () => {
+    const mixed: NormalizedEvent[] = [
+      ...EVENTS,
+      { ...EVENTS[1], id: "wrong-market", market: "BTCPERP" },
+    ];
+    expect(() => createReplayArchive(MARKETS.BTC, "1m", mixed, 5_000)).toThrow(/mixed instruments/);
+    expect(() => new EventRecorder().importJson(JSON.stringify({ format: "veilflow-session-v2", events: mixed }))).toThrow(/mixed instruments/);
+  });
+
   it("round-trips v3 archives and remains backward compatible", () => {
     const recorder = new EventRecorder();
     EVENTS.forEach((event) => recorder.append(event));
