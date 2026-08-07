@@ -1,0 +1,60 @@
+/* Preserve proportional sidebar sizing and true panel collapse after the visual refinement. */
+
+.vf-sidebar {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.vf-panel:first-child {
+  min-height: 280px;
+  flex: 1.45 1 0;
+}
+
+.vf-panel:nth-child(2) {
+  min-height: 140px;
+  flex: .65 1 0;
+}
+
+.vf-panel:nth-child(3) {
+  min-height: 160px;
+  flex: .75 1 0;
+}
+
+.vf-panel.vf-collapsed,
+.vf-panel:first-child.vf-collapsed,
+.vf-panel:nth-child(2).vf-collapsed,
+.vf-panel:nth-child(3).vf-collapsed {
+  min-height: 44px;
+  flex: 0 0 44px;
+}
+
+@media (max-width: 820px) {
+  .vf-sidebar {
+    flex-direction: row;
+    gap: 1px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .vf-panel,
+  .vf-panel:first-child,
+  .vf-panel:nth-child(2),
+  .vf-panel:nth-child(3),
+  .vf-panel.vf-collapsed {
+    min-width: min(84vw, 380px);
+    min-height: 388px;
+    flex: 0 0 min(84vw, 380px);
+  }
+}
+
+@media (max-width: 560px) {
+  .vf-panel,
+  .vf-panel:first-child,
+  .vf-panel:nth-child(2),
+  .vf-panel:nth-child(3),
+  .vf-panel.vf-collapsed {
+    min-width: 88vw;
+    flex-basis: 88vw;
+  }
+}
