@@ -38,7 +38,7 @@ function normalizeForStableJson(value: unknown): unknown {
 }
 
 export function stableStringify(value: unknown): string {
-  return JSON.stringify(normalizeForStableJson(value));
+  return JSON.stringify(normalizeForStableJson(value)) ?? "null";
 }
 
 export function sha256Hex(value: string): string {
