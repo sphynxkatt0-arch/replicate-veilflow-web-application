@@ -3,10 +3,27 @@ import { installDeterministicBinance } from "./binanceFixture";
 
 test("mobile chart uses performance-safe rendering and interaction defaults", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile-chromium", "Mobile-only performance regression coverage");
+  const diagnostics: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error" || message.type() === "warning") diagnostics.push(`console:${message.type()}: ${message.text()}`);
+  });
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.message}`));
   await installDeterministicBinance(page);
 
-  await page.goto("/", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("#root .vf-app")).toBeVisible();
+  const response = await page.goto("/", { waitUntil: "domcontentloaded" });
+  const app = page.locator("#root .vf-app");
+  try {
+    await expect(app).toBeVisible({ timeout: 20_000 });
+  } catch (error) {
+    const body = (await page.locator("body").innerText().catch(() => "")).slice(0, 1200);
+    throw new Error([
+      `Mobile application did not mount. status=${response?.status() ?? "none"} url=${page.url()} title=${await page.title()}`,
+      ...diagnostics,
+      `body=${body}`,
+      error instanceof Error ? error.message : String(error),
+    ].join("\n"));
+  }
+
   await expect(page.locator("html")).toHaveClass(/vf-mobile-performance/);
   await expect(page.locator(".vf-chart-performance-shell")).toHaveClass(/vf-chart-performance-mobile/);
 
