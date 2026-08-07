@@ -13,7 +13,7 @@ export interface ReplayCheckpoint {
   eventHash: string;
 }
 
-export interface ReplayArchiveV3 {
+interface ReplayManifest {
   format: typeof REPLAY_FORMAT;
   schemaVersion: 3;
   createdAt: number;
@@ -25,6 +25,10 @@ export interface ReplayArchiveV3 {
   eventHash: string;
   checkpointInterval: number;
   checkpoints: ReplayCheckpoint[];
+}
+
+export interface ReplayArchiveV3 extends ReplayManifest {
+  manifestHash: string;
   events: NormalizedEvent[];
 }
 
@@ -49,6 +53,22 @@ function buildCheckpoints(events: NormalizedEvent[]): ReplayCheckpoint[] {
   return checkpoints;
 }
 
+function manifestFromArchive(archive: ReplayArchiveV3): ReplayManifest {
+  return {
+    format: archive.format,
+    schemaVersion: archive.schemaVersion,
+    createdAt: archive.createdAt,
+    market: archive.market,
+    timeframe: archive.timeframe,
+    startTime: archive.startTime,
+    endTime: archive.endTime,
+    eventCount: archive.eventCount,
+    eventHash: archive.eventHash,
+    checkpointInterval: archive.checkpointInterval,
+    checkpoints: archive.checkpoints,
+  };
+}
+
 export function createReplayArchive(
   market: MarketDefinition,
   timeframe: string,
@@ -56,7 +76,7 @@ export function createReplayArchive(
   createdAt = Date.now(),
 ): ReplayArchiveV3 {
   const snapshot = events.slice(-MAX_EVENTS);
-  return {
+  const manifest: ReplayManifest = {
     format: REPLAY_FORMAT,
     schemaVersion: 3,
     createdAt,
@@ -68,6 +88,10 @@ export function createReplayArchive(
     eventHash: integrityHash(snapshot),
     checkpointInterval: CHECKPOINT_EVENT_COUNT,
     checkpoints: buildCheckpoints(snapshot),
+  };
+  return {
+    ...manifest,
+    manifestHash: integrityHash(manifest),
     events: snapshot,
   };
 }
@@ -79,6 +103,9 @@ export function validateReplayArchive(archive: ReplayArchiveV3): void {
   if (!Array.isArray(archive.events) || !Array.isArray(archive.checkpoints)) {
     throw new Error("Replay archive is missing events or checkpoints");
   }
+  if (archive.manifestHash !== integrityHash(manifestFromArchive(archive))) {
+    throw new Error("Replay manifest integrity hash mismatch");
+  }
   if (archive.eventCount !== archive.events.length) {
     throw new Error(`Replay event count mismatch: manifest ${archive.eventCount}, payload ${archive.events.length}`);
   }
@@ -87,8 +114,8 @@ export function validateReplayArchive(archive: ReplayArchiveV3): void {
   }
 
   const expectedCheckpoints = buildCheckpoints(archive.events);
-  if (archive.checkpoints.length !== expectedCheckpoints.length) {
-    throw new Error("Replay checkpoint count mismatch");
+  if (archive.checkpointInterval !== CHECKPOINT_EVENT_COUNT || archive.checkpoints.length !== expectedCheckpoints.length) {
+    throw new Error("Replay checkpoint manifest mismatch");
   }
   for (let index = 0; index < expectedCheckpoints.length; index += 1) {
     const expected = expectedCheckpoints[index];
