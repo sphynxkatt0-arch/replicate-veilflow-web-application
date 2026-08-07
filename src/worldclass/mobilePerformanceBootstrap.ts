@@ -18,6 +18,10 @@ function initializeMobilePerformance(): void {
   document.documentElement.classList.add("vf-mobile-performance");
 
   try {
+    // The current generic storage hook merges objects and cannot safely rehydrate primitives.
+    // Remove an existing primitive chart mode before React initializes; the in-memory fallback is candles.
+    localStorage.removeItem("vf-chart-mode");
+
     if (localStorage.getItem(MIGRATION_KEY) === "1") return;
 
     const settings = readObject("vf-settings-v6");
@@ -25,10 +29,6 @@ function initializeMobilePerformance(): void {
 
     const panels = readObject("vf-panels");
     localStorage.setItem("vf-panels", JSON.stringify({ ...panels, book: false, prints: true, tape: true }));
-
-    if (!localStorage.getItem("vf-chart-mode")) {
-      localStorage.setItem("vf-chart-mode", JSON.stringify("candles"));
-    }
 
     localStorage.setItem(MIGRATION_KEY, "1");
   } catch {
