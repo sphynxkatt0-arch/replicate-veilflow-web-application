@@ -1,16 +1,18 @@
 import { expect, test } from "@playwright/test";
+import { installDeterministicBinance } from "./binanceFixture";
 
 async function expectLivePrice(page: import("@playwright/test").Page) {
   const price = page.locator(".vf-price strong");
   await expect(price).toBeVisible();
-  await expect.poll(async () => (await price.textContent())?.trim(), { timeout: 30_000, message: "A live market price must arrive" }).not.toBe("—");
+  await expect.poll(async () => (await price.textContent())?.trim(), { timeout: 30_000, message: "A normalized market price must arrive" }).not.toBe("—");
 }
 
 test("production-grade spot, perpetual, replay, and trust workflow", async ({ page }, testInfo) => {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
-  page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(`${message.location().url}: ${message.text()}`); });
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  await installDeterministicBinance(page);
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("#root .vf-app")).toBeVisible();
