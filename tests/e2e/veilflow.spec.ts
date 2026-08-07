@@ -66,7 +66,7 @@ test("production-grade spot, perpetual, replay, and trust workflow", async ({ pa
 
   await page.keyboard.press("s");
   await expect(page.getByRole("dialog", { name: /display, accessibility, and footprint/i })).toBeVisible();
-  await page.getByText("Color palette").locator("..").getByRole("combobox").selectOption("high-contrast");
+  await page.getByText("Color palette").locator("../..").getByRole("combobox").selectOption("high-contrast");
   await expect(page.locator(".vf-app")).toHaveClass(/vf-palette-high-contrast/);
   await page.keyboard.press("Escape");
 
