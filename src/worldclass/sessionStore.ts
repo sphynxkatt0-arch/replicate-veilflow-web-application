@@ -1,4 +1,4 @@
-import { createReplayArchive, validateReplayArchive, type ReplayArchiveV3 } from "./recorder";
+import { createReplayArchive, validateReplayArchive, type ReplayArchiveV4 } from "./recorder";
 import type { MarketDefinition, NormalizedEvent } from "./types";
 
 export interface StoredSessionSummary {
@@ -18,7 +18,7 @@ export interface StoredSessionSummary {
 }
 
 export interface StoredSession extends StoredSessionSummary {
-  archive: ReplayArchiveV3;
+  archive: ReplayArchiveV4;
 }
 
 export interface SessionStore {
@@ -37,7 +37,7 @@ export function sessionId(market: MarketDefinition, timeframe: string, createdAt
   return `${safeId(market.key)}-${safeId(timeframe)}-${createdAt}-${eventHash.slice(-12)}`;
 }
 
-export function sessionFromArchive(name: string, archive: ReplayArchiveV3): StoredSession {
+export function sessionFromArchive(name: string, archive: ReplayArchiveV4): StoredSession {
   validateReplayArchive(archive);
   const raw = JSON.stringify(archive);
   const id = sessionId(archive.market, archive.timeframe, archive.createdAt, archive.eventHash);
