@@ -86,7 +86,7 @@ export function MarketChart(props: Props) {
       ...props.settings,
       showVolume: false,
       showDepth: false,
-      showLargeTrades: false,
+      showLargeTrades: props.settings.showLargeTrades,
       footprintTicksPerRow: Math.max(25, props.settings.footprintTicksPerRow),
     };
   }, [mobile, props.settings]);
