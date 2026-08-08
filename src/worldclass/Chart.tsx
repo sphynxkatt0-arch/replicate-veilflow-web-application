@@ -4,6 +4,7 @@ import { regroupFootprint } from "./footprint";
 import { clamp, formatCompact, formatNotional, formatPrice, formatTime } from "./format";
 import { groupBook } from "./orderBook";
 import { resolveFootprintSemanticZoom, semanticDisplayStep } from "./semanticZoom";
+import { buildUnfinishedAuctionLevels } from "./unfinishedAuction";
 import type { Candle, ChartMode, FootprintCandle, FootprintQuality, MarketState } from "./types";
 
 interface ChartSettings {
@@ -147,6 +148,8 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
   const large = useMemo(() => detectLargeTrades(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000), [state.trades, state.market.key]);
   const groupedBook = useMemo(() => groupBook(state.book, Math.max(state.market.tickSize, (state.book?.asks[0]?.price ?? 1) * 0.00005), 22), [state.book, state.market.tickSize]);
   const semanticPreview = useMemo(() => resolveFootprintSemanticZoom((size.width - 78) / Math.max(1, visible.length)), [size.width, visible.length]);
+  const auctionLevels = useMemo(() => buildUnfinishedAuctionLevels(state.footprints, state.candles), [state.footprints, state.candles]);
+  const openAuctionCount = useMemo(() => auctionLevels.filter((level) => !level.resolved).length, [auctionLevels]);
 
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
@@ -441,6 +444,40 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       visible.forEach((candle, index) => drawCandle(candle, index));
     }
 
+    if (mode === "footprint" && auctionLevels.length) {
+      const visibleStart = visible[0].time;
+      const visibleEnd = visible.at(-1)!.endTime;
+      const candleIndexByTime = new Map(visible.map((candle, index) => [candle.time, index]));
+      for (const level of auctionLevels) {
+        if (level.sourceTime > visibleEnd || level.endTime < visibleStart) continue;
+        const y = yFor(level.price);
+        if (y < -6 || y > plotHeight + 6) continue;
+        const sourceIndex = candleIndexByTime.get(level.sourceTime);
+        const startX = level.sourceTime < visibleStart ? 0 : sourceIndex === undefined ? 0 : xFor(sourceIndex);
+        let endX = plotWidth;
+        if (level.endTime <= visibleEnd) {
+          const exactEnd = candleIndexByTime.get(level.endTime);
+          if (exactEnd !== undefined) endX = xFor(exactEnd);
+          else {
+            const nextIndex = visible.findIndex((candle) => candle.time >= level.endTime);
+            if (nextIndex >= 0) endX = xFor(nextIndex);
+          }
+        }
+        if (endX < startX) continue;
+        ctx.strokeStyle = level.resolved ? "rgba(244,189,74,.34)" : "rgba(244,189,74,.88)";
+        ctx.lineWidth = level.resolved ? 1 : 1.35;
+        ctx.setLineDash(level.resolved ? [4, 4] : [7, 3]);
+        ctx.beginPath(); ctx.moveTo(startX, y); ctx.lineTo(endX, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = level.resolved ? "rgba(244,189,74,.55)" : "#f4bd4a";
+        ctx.font = "800 8px JetBrains Mono, monospace";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        const labelX = clamp(endX + 4, 4, plotWidth - 54);
+        ctx.fillText(`UA ${level.side === "high" ? "H" : "L"}${level.resolved ? " ✓" : ""}`, labelX, y - 2);
+      }
+    }
+
     if (settings.showVwap && state.analytics.sessionVwap) {
       const y = yFor(state.analytics.sessionVwap);
       ctx.strokeStyle = "#f4bd4a"; ctx.lineWidth = 1.3; ctx.setLineDash([6, 4]);
@@ -525,7 +562,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
 
     renderMetaRef.current = { dpr, width, height, plotWidth, plotHeight, min, max, priceRange, xStep, displayStep, visible, footprints: displayFootprints };
     queueOverlay();
-  }, [size, visible, state.analytics.sessionVwap, state.market.tickSize, state.market.footprintDefaultTicks, state.market.priceDecimals, mode, settings, replayActive, groupedBook, large, footprintByTime, queueOverlay]);
+  }, [size, visible, state.analytics.sessionVwap, state.market.tickSize, state.market.footprintDefaultTicks, state.market.priceDecimals, mode, settings, replayActive, groupedBook, large, footprintByTime, auctionLevels, queueOverlay]);
 
   const point = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -591,7 +628,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       <div className="vf-chart-hud">
         <span>{visible.length} bars</span>
         <span>Zoom {bars}</span>
-        {mode === "footprint" && <span>Semantic {semanticPreview.label} · Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()}</span>}
+        {mode === "footprint" && <span>Semantic {semanticPreview.label} · Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()} · UA open {openAuctionCount}</span>}
         <span>Big orders ≥ {formatNotional(large.threshold)}</span>
       </div>
     </div>
