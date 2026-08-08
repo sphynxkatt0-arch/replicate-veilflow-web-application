@@ -88,4 +88,27 @@ describe("FootprintAccumulator", () => {
     expect(grouped.totalVolume).toBeCloseTo(result.footprints[0].totalVolume);
     expect(grouped.rows.length).toBeLessThan(result.footprints[0].rows.length);
   });
+
+  it("hydrates immutable server footprints then appends only newer live executions", () => {
+    const historicalTrades = [
+      trade("1", 1_000, 100.0, 4, "sell", 1),
+      trade("2", 2_000, 100.1, 6, "buy", 2),
+    ];
+    const seeded = buildFootprints(MARKETS.BTC, "1m", [candle], historicalTrades, {
+      source: "binance-aggtrades", startTime: 0, endTime: 59_999, contiguous: true, eventCount: 2,
+    }, 70_000).footprints;
+    const nextCandle: Candle = { ...candle, time: 60_000, endTime: 119_999, open: 101, high: 103, low: 100, close: 102, volume: 2 };
+    const accumulator = new FootprintAccumulator(MARKETS.BTC, "1m");
+    accumulator.reset([candle, nextCandle], [
+      trade("duplicate-history", 2_000, 100.1, 6, "buy", 2),
+      trade("live", 61_000, 102, 2, "buy", 3),
+    ], {
+      source: "collector-api", startTime: 0, endTime: 59_999, contiguous: true, eventCount: 2, detail: "Server footprints",
+    }, 70_000, seeded);
+    const snapshot = accumulator.snapshot(130_000);
+    expect(snapshot.footprints[0].totalVolume).toBe(10);
+    expect(snapshot.footprints[1].totalVolume).toBe(2);
+    expect(snapshot.coverage.source).toBe("collector-api");
+    expect(snapshot.coverage.detail).toContain("Server footprints");
+  });
 });
