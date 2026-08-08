@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeRanges, mergeViewportFootprints, rangeCovered, viewportRequestRange } from "../useViewportFootprints";
+import { mergeRanges, mergeRenderFootprints, mergeViewportFootprints, rangeCovered, viewportRequestRange } from "../useViewportFootprints";
 import type { Candle, FootprintCandle } from "../types";
 
 function candles(count: number): Candle[] {
@@ -14,19 +14,34 @@ function candles(count: number): Candle[] {
   }));
 }
 
-function footprint(time: number): FootprintCandle {
+function footprint(time: number, quality: FootprintCandle["quality"] = "full", rowCount = 0): FootprintCandle {
+  const rows = Array.from({ length: rowCount }, () => ({
+    price: 100,
+    bidVolume: 1,
+    askVolume: 1,
+    totalVolume: 2,
+    delta: 0,
+    tradeCount: 2,
+    bidTrades: 1,
+    askTrades: 1,
+    bidImbalance: false,
+    askImbalance: false,
+    stackedBid: false,
+    stackedAsk: false,
+    inValueArea: false,
+  }));
   return {
     time,
     endTime: time + 59_999,
-    rows: [],
-    totalBidVolume: 0,
-    totalAskVolume: 0,
-    totalVolume: 0,
+    rows,
+    totalBidVolume: rowCount,
+    totalAskVolume: rowCount,
+    totalVolume: rowCount * 2,
     delta: 0,
     maxDelta: 0,
     minDelta: 0,
-    tradeCount: 0,
-    quality: "full",
+    tradeCount: rowCount * 2,
+    quality,
     priceStep: 1,
   };
 }
@@ -65,5 +80,21 @@ describe("viewport footprint loading", () => {
     expect(merged).toHaveLength(200);
     expect(merged.at(-1)?.time).toBe(999 * 60_000);
     expect(merged[0].time).toBeGreaterThanOrEqual(800 * 60_000);
+  });
+
+  it("keeps server viewport history when engine only has aggregate candles", () => {
+    const historical = footprint(60_000, "full", 1);
+    const aggregate = footprint(60_000, "aggregate-only", 0);
+    const merged = mergeRenderFootprints([aggregate], [historical]);
+    expect(merged[0].quality).toBe("full");
+    expect(merged[0].rows).toHaveLength(1);
+  });
+
+  it("lets live price-level executions override historical viewport copies", () => {
+    const historical = footprint(60_000, "full", 1);
+    const live = footprint(60_000, "live-partial", 2);
+    const merged = mergeRenderFootprints([live], [historical]);
+    expect(merged[0].quality).toBe("live-partial");
+    expect(merged[0].rows).toHaveLength(2);
   });
 });
