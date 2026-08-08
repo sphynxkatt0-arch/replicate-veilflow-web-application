@@ -8,7 +8,7 @@ import type {
   Timeframe,
 } from "./types";
 
-interface CollectorManifest {
+export interface CollectorManifest {
   id: string;
   status?: string;
   venue?: string;
@@ -143,10 +143,12 @@ async function fetchCollector<T>(url: string, signal?: AbortSignal): Promise<T> 
   return response.json() as Promise<T>;
 }
 
-function productMatches(manifest: CollectorManifest, market: MarketDefinition): boolean {
-  const expected = market.productType === "perpetual-proxy" ? "perpetual" : market.productType;
-  return String(manifest.venueSymbol ?? "").toUpperCase() === market.providerSymbol.toUpperCase()
-    && String(manifest.productType ?? "") === expected;
+export function collectorManifestMatchesMarket(manifest: CollectorManifest, market: MarketDefinition): boolean {
+  const expectedProduct = market.productType === "perpetual-proxy" ? "perpetual" : market.productType;
+  const venueMatches = String(manifest.venue ?? "").trim().toLowerCase() === market.provider.toLowerCase();
+  const symbolMatches = String(manifest.venueSymbol ?? "").toUpperCase() === market.providerSymbol.toUpperCase();
+  const productMatches = String(manifest.productType ?? "") === expectedProduct;
+  return venueMatches && symbolMatches && productMatches;
 }
 
 function overlap(manifest: CollectorManifest, startTime: number, endTime: number): number {
@@ -169,7 +171,7 @@ export async function loadCollectorFootprints(
     const requestedEnd = candles.at(-1)?.endTime ?? Date.now();
     const catalogue = await fetchCollector<{ sessions?: CollectorManifest[] }>(`${base}/sessions`, signal);
     const sessions = (catalogue.sessions ?? [])
-      .filter((item) => item.status === "complete" && productMatches(item, market) && overlap(item, requestedStart, requestedEnd) > 0)
+      .filter((item) => item.status === "complete" && collectorManifestMatchesMarket(item, market) && overlap(item, requestedStart, requestedEnd) > 0)
       .sort((left, right) => {
         const coverage = overlap(right, requestedStart, requestedEnd) - overlap(left, requestedStart, requestedEnd);
         return coverage || finite(right.updatedAt) - finite(left.updatedAt);
