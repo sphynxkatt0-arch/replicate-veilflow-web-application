@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FootprintAccumulator } from "../footprint";
 import { MARKETS } from "../markets";
 import { appendLiveTrade } from "../useMarketEngine";
+import { recentLargeTradeInput } from "../useLargeTradeAnalysis";
 import type { Candle, Trade } from "../types";
 
 function trade(index: number, exchangeTime = 1_000 + index): Trade {
@@ -31,6 +32,14 @@ describe("live-path bounded buffers", () => {
     const latest = trades.at(-1)!;
     expect(appendLiveTrade(trades, seen, latest)).toBe(false);
     expect(seen.size).toBe(trades.length);
+  });
+
+  it("bounds large-order worker messages to the latest 3000 executions", () => {
+    const trades = Array.from({ length: 12_000 }, (_, index) => trade(index));
+    const recent = recentLargeTradeInput(trades);
+    expect(recent).toHaveLength(3_000);
+    expect(recent[0].id).toBe("trade-9000");
+    expect(recent.at(-1)?.id).toBe("trade-11999");
   });
 });
 
