@@ -247,6 +247,8 @@ export function footprintCoverage(events, footprints, options = {}) {
     requestedEndTime: validRangeValue(options.endTime),
     availableStartTime: first?.exchangeTimestamp,
     availableEndTime: last?.exchangeTimestamp,
+    firstSequence: first?.sequence,
+    lastSequence: last?.sequence,
     eventCount: tradeEvents.length,
     footprintCount: footprints.length,
     contiguous: quality !== "GAPPED",
