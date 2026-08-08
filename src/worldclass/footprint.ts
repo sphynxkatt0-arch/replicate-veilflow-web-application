@@ -112,6 +112,27 @@ function deriveRows(input: Iterable<MutableRow>, step: number, ratio: number, mi
   return rows;
 }
 
+function trustedAuctionQuality(quality: FootprintQuality): boolean {
+  return quality === "full" || quality === "replay-full";
+}
+
+export function unfinishedAuctionState(rows: FootprintRow[], quality: FootprintQuality): Pick<FootprintCandle, "unfinishedHigh" | "unfinishedLow" | "unfinishedHighPrice" | "unfinishedLowPrice"> {
+  if (!trustedAuctionQuality(quality) || rows.length === 0) {
+    return { unfinishedHigh: undefined, unfinishedLow: undefined, unfinishedHighPrice: undefined, unfinishedLowPrice: undefined };
+  }
+  const descending = [...rows].sort((a, b) => b.price - a.price);
+  const high = descending[0];
+  const low = descending.at(-1)!;
+  const unfinishedHigh = high.bidVolume > 0 && high.askVolume > 0;
+  const unfinishedLow = low.bidVolume > 0 && low.askVolume > 0;
+  return {
+    unfinishedHigh,
+    unfinishedLow,
+    unfinishedHighPrice: unfinishedHigh ? high.price : undefined,
+    unfinishedLowPrice: unfinishedLow ? low.price : undefined,
+  };
+}
+
 function summarize(
   candle: Candle,
   rows: FootprintRow[],
@@ -156,6 +177,7 @@ function summarize(
     valueAreaHigh,
     valueAreaLow,
     coverageRatio: candle.volume > 0 ? totalVolume / candle.volume : undefined,
+    ...unfinishedAuctionState(rows, quality),
     quality,
     priceStep,
   };
@@ -183,7 +205,14 @@ export function regroupFootprint(
   minVolume: number,
 ): FootprintCandle {
   if (!footprint.rows.length || Math.abs(footprint.priceStep - step) < Number.EPSILON) return footprint;
-  return summarize(candle, deriveRows(aggregateRows(footprint.rows, step), step, imbalanceRatio, minVolume), step, footprint.quality);
+  const regrouped = summarize(candle, deriveRows(aggregateRows(footprint.rows, step), step, imbalanceRatio, minVolume), step, footprint.quality);
+  return {
+    ...regrouped,
+    unfinishedHigh: footprint.unfinishedHigh,
+    unfinishedLow: footprint.unfinishedLow,
+    unfinishedHighPrice: footprint.unfinishedHighPrice,
+    unfinishedLowPrice: footprint.unfinishedLowPrice,
+  };
 }
 
 export class FootprintAccumulator {
@@ -323,7 +352,7 @@ export class FootprintAccumulator {
       } else {
         const quality = this.qualityFor(bucket.candle, footprint.rows, now, replay);
         if (quality !== footprint.quality) {
-          footprint = { ...footprint, quality };
+          footprint = { ...footprint, quality, ...unfinishedAuctionState(footprint.rows, quality) };
           bucket.cached = footprint;
         }
       }
