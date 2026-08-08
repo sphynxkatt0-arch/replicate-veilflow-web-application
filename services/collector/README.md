@@ -5,6 +5,7 @@ This service moves authoritative capture, normalization, sequence validation, re
 ## Services
 
 - `runtime.mjs`: long-running venue collector with deduplication, bounded out-of-order handling, sequence-gap detection, exponential reconnect, stale detection, quality transitions, periodic checkpoints, and append-only event storage.
+- `history.mjs`: historical Binance Spot/USDⓈ-M aggregate-trade ingestion over explicit time ranges with pagination, deduplication, sequence-gap detection, and durable normalized session output.
 - `api.mjs`: session catalogue, integrity verification, paged normalized events, historical footprint reconstruction, and CSV export.
 - `gateway.mjs`: regional Server-Sent Events relay. Clients reconnect with a cursor and receive the same normalized sequence.
 - `adapters.mjs`: Binance Spot/USDⓈ-M, Coinbase, Bybit, OKX, Hyperliquid, and Deribit normalized adapters.
@@ -35,6 +36,32 @@ Or start the reference multi-service deployment:
 ```bash
 docker compose -f services/collector/compose.yaml up --build
 ```
+
+## Historical Binance execution backfill
+
+The browser must not be responsible for reconstructing deep historical footprints from millions of executions. Seed the durable collector store first, then serve reconstructed or precomputed footprints from the collector API.
+
+By default this command ingests the latest 24 hours of `BTCUSDT` spot aggregate trades:
+
+```bash
+VEILFLOW_DATA_DIR=.veilflow-data npm run collector:backfill
+```
+
+Use an explicit historical range when required:
+
+```bash
+VEILFLOW_VENUE_SYMBOL=BTCUSDT \
+VEILFLOW_SYMBOL=BTC/USDT \
+VEILFLOW_PRODUCT_TYPE=perpetual \
+VEILFLOW_START_TIME=2026-08-08T00:00:00Z \
+VEILFLOW_END_TIME=2026-08-09T00:00:00Z \
+VEILFLOW_DATA_DIR=.veilflow-data \
+npm run collector:backfill
+```
+
+`VEILFLOW_START_TIME` and `VEILFLOW_END_TIME` accept ISO timestamps or Unix milliseconds. The importer requests Binance in bounded time windows, continues with `fromId` when a window contains more than one page, deduplicates aggregate-trade IDs, and records any missing sequence range as an explicit `GAPPED` quality transition. It never silently fabricates execution history.
+
+The resulting session is immediately available through the same `/sessions/:id/...` API used by replay and footprint reconstruction.
 
 ## API
 
