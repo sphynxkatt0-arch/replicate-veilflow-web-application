@@ -9,13 +9,13 @@
     "test": "vitest run",
     "test:collector": "node --test services/collector/test/*.test.mjs",
     "test:all": "npm test && npm run test:collector",
-    "test:e2e": "playwright test",
     "build": "npm run typecheck && npm run test:all && vite build",
     "test:watch": "vitest",
     "preview": "vite preview",
     "collector": "node services/collector/runtime.mjs",
     "collector:api": "node services/collector/api.mjs",
-    "collector:gateway": "node services/collector/gateway.mjs"
+    "collector:gateway": "node services/collector/gateway.mjs",
+    "collector:backfill": "node services/collector/history.mjs"
   },
   "dependencies": {
     "react": "19.2.6",
@@ -25,7 +25,6 @@
     "@playwright/test": "1.62.1",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "5.1.1",
     "typescript": "5.9.3",
     "vite": "7.3.6",
     "vitest": "3.2.7"
