@@ -55,6 +55,17 @@ describe("large trade detection", () => {
     expect(result.threshold).toBe(50_000);
   });
 
+  it("detects absolute-floor big orders before the adaptive sample is warm", () => {
+    const trades: Trade[] = [
+      { id: "small", exchangeTime: day, receiveTime: day, price: 100, size: 1, side: "sell", notional: 100 },
+      { id: "big", exchangeTime: day + 100, receiveTime: day + 100, price: 100.1, size: 800, side: "buy", notional: 80_000 },
+    ];
+    const result = detectLargeTrades(trades, 50_000);
+    expect(result.threshold).toBe(50_000);
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].id).toBe("large-big");
+  });
+
   it("detects genuine outliers without forcing a minimum count", () => {
     const trades: Trade[] = Array.from({ length: 50 }, (_, index) => ({
       id: String(index),

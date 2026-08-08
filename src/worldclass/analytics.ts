@@ -87,9 +87,10 @@ export function detectLargeTrades(
   burstWindowMs = 350,
 ): { threshold: number; events: LargeTrade[] } {
   const recent = trades.slice(-3000);
-  if (recent.length < 20) return { threshold: absoluteFloor, events: [] };
+  if (!recent.length) return { threshold: absoluteFloor, events: [] };
   const notionals = recent.map((trade) => trade.notional).sort((a, b) => a - b);
-  const threshold = Math.max(absoluteFloor, quantile(notionals, percentile));
+  const adaptiveThreshold = recent.length >= 20 ? quantile(notionals, percentile) : 0;
+  const threshold = Math.max(absoluteFloor, adaptiveThreshold);
   const mean = notionals.reduce((sum, value) => sum + value, 0) / notionals.length;
   const variance = notionals.reduce((sum, value) => sum + (value - mean) ** 2, 0) / Math.max(1, notionals.length - 1);
   const sd = Math.sqrt(variance) || 1;
@@ -98,7 +99,8 @@ export function detectLargeTrades(
 
   for (const trade of candidates) {
     const previous = events.at(-1);
-    if (previous && previous.side === trade.side && trade.exchangeTime - previous.endTime <= burstWindowMs) {
+    const priceDistanceBps = previous && previous.price > 0 ? Math.abs(trade.price - previous.price) / previous.price * 10_000 : Number.POSITIVE_INFINITY;
+    if (previous && previous.side === trade.side && trade.exchangeTime - previous.endTime <= burstWindowMs && priceDistanceBps <= 4) {
       const totalNotional = previous.notional + trade.notional;
       previous.price = (previous.price * previous.notional + trade.price * trade.notional) / totalNotional;
       previous.notional = totalNotional;

@@ -2,6 +2,7 @@ import { integrityHash } from "./integrity";
 import type { Candle, ConnectionState, MarketDefinition, MarketMetrics, MarketState, NormalizedEvent, OrderBook, ReplayState, Trade } from "./types";
 
 const MAX_EVENTS = 200_000;
+const EVENT_TRIM_BATCH = 5_000;
 const CHECKPOINT_EVENT_COUNT = 5_000;
 const REPLAY_FORMAT = "veilflow-session-v4" as const;
 
@@ -271,10 +272,17 @@ export class EventRecorder {
     if (this.marketKey && event.market !== this.marketKey) return;
     this.marketKey = event.market;
     this.events.push(event);
-    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
+    if (this.events.length > MAX_EVENTS + EVENT_TRIM_BATCH) {
+      this.events.splice(0, this.events.length - MAX_EVENTS);
+    }
   }
 
-  snapshot(): NormalizedEvent[] { return this.events.slice(); }
+  get eventCount(): number { return this.events.length; }
+
+  snapshot(limit = MAX_EVENTS): NormalizedEvent[] {
+    const bounded = Math.max(0, Math.min(MAX_EVENTS, Math.floor(limit)));
+    return bounded === 0 ? [] : this.events.slice(-bounded);
+  }
 
   exportJson(market: MarketDefinition, timeframe: string): string {
     return JSON.stringify(createReplayArchive(market, timeframe, this.events));

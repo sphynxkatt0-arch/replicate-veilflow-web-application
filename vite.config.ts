@@ -1,3 +1,4 @@
+import { fileURLToPath, URL } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 
@@ -24,6 +25,14 @@ function buildMetadataPlugin(): Plugin {
 
 export default defineConfig({
   plugins: [react(), buildMetadataPlugin()],
+  resolve: {
+    alias: [
+      {
+        find: /^\.\/Chart$/,
+        replacement: fileURLToPath(new URL("./src/worldclass/ChartOptimized.tsx", import.meta.url)),
+      },
+    ],
+  },
   define: {
     __VEILFLOW_BUILD_META__: JSON.stringify(buildMeta),
   },

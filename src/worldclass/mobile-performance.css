@@ -1,0 +1,161 @@
+/* Mobile performance guardrails. These rules apply only to narrow/coarse-pointer runtimes. */
+
+.vf-chart-performance-shell,
+.vf-chart-runtime,
+.vf-chart-runtime > .vf-chart-wrap {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.vf-chart-performance-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+@media (max-width: 820px), (pointer: coarse) {
+  .vf-chart-performance-mobile,
+  .vf-chart-performance-mobile .vf-chart-wrap,
+  .vf-chart-performance-mobile .vf-chart-canvas {
+    contain: strict;
+  }
+
+  .vf-chart-runtime.vf-chart-passive .vf-chart-canvas {
+    pointer-events: none;
+    touch-action: pan-y;
+  }
+
+  .vf-chart-gesture-toggle {
+    position: absolute;
+    z-index: 8;
+    right: 9px;
+    bottom: 34px;
+    min-height: 32px;
+    padding: 0 10px;
+    border: 1px solid #294157;
+    border-radius: 999px;
+    color: #9cb1c5;
+    background: rgba(5, 12, 19, .94);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+    font-size: 9px;
+    font-weight: 750;
+  }
+
+  .vf-chart-gesture-toggle.vf-active {
+    color: #22d3e2;
+    border-color: rgba(34, 211, 226, .48);
+  }
+
+  .vf-workspace {
+    grid-template-rows: minmax(480px, 68dvh) 310px;
+  }
+
+  .vf-chart-column {
+    grid-template-rows: 56px minmax(300px, 1fr) 96px;
+  }
+
+  .vf-metrics {
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: thin;
+  }
+
+  .vf-metric {
+    min-width: 150px;
+    flex: 0 0 150px;
+    scroll-snap-align: start;
+  }
+
+  .vf-sidebar {
+    height: 310px;
+    min-height: 310px;
+    contain: layout paint style;
+    overscroll-behavior-x: contain;
+  }
+
+  .vf-panel,
+  .vf-panel:first-child,
+  .vf-panel:nth-child(2),
+  .vf-panel:nth-child(3) {
+    min-height: 308px;
+    max-height: 308px;
+    content-visibility: auto;
+    contain: layout paint style;
+    contain-intrinsic-size: 360px 308px;
+  }
+
+  .vf-panel.vf-collapsed,
+  .vf-panel:first-child.vf-collapsed,
+  .vf-panel:nth-child(2).vf-collapsed,
+  .vf-panel:nth-child(3).vf-collapsed {
+    min-width: 52px;
+    width: 52px;
+    max-width: 52px;
+    min-height: 308px;
+    flex: 0 0 52px;
+  }
+
+  .vf-panel.vf-collapsed > header {
+    width: 52px;
+    min-height: 308px;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 10px 8px;
+  }
+
+  .vf-panel.vf-collapsed > header > div:first-child {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    align-items: center;
+  }
+
+  .vf-panel.vf-collapsed > header small,
+  .vf-panel.vf-collapsed > header .vf-quality,
+  .vf-panel.vf-collapsed > header .vf-threshold,
+  .vf-panel.vf-collapsed > header .vf-count {
+    display: none;
+  }
+
+  .vf-panel.vf-collapsed > header > button {
+    margin-left: 0;
+    margin-top: auto;
+  }
+
+  .vf-statusbar {
+    content-visibility: auto;
+    contain: layout paint style;
+  }
+}
+
+@media (max-width: 560px) {
+  .vf-workspace {
+    grid-template-rows: minmax(450px, 66dvh) 292px;
+  }
+
+  .vf-chart-column {
+    grid-template-rows: 54px minmax(278px, 1fr) 92px;
+  }
+
+  .vf-sidebar,
+  .vf-panel,
+  .vf-panel:first-child,
+  .vf-panel:nth-child(2),
+  .vf-panel:nth-child(3),
+  .vf-panel.vf-collapsed,
+  .vf-panel:first-child.vf-collapsed,
+  .vf-panel:nth-child(2).vf-collapsed,
+  .vf-panel:nth-child(3).vf-collapsed {
+    min-height: 290px;
+    max-height: 290px;
+  }
+
+  .vf-panel.vf-collapsed > header {
+    min-height: 290px;
+  }
+}

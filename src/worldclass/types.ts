@@ -93,9 +93,11 @@ export interface FootprintCandle {
 
 export interface FootprintCoverage {
   quality: FootprintQuality;
-  source: "binance-aggtrades" | "live-stream" | "hyperliquid-live" | "replay" | "none";
+  source: "collector-api" | "binance-aggtrades" | "live-stream" | "hyperliquid-live" | "replay" | "none";
   startTime?: number;
   endTime?: number;
+  startSequence?: number;
+  endSequence?: number;
   contiguous: boolean;
   eventCount: number;
   gappedAt?: number;

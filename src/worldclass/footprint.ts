@@ -30,6 +30,8 @@ interface MutableRow {
 interface MutableCandle {
   candle: Candle;
   rows: Map<number, MutableRow>;
+  dirty: boolean;
+  cached?: FootprintCandle;
 }
 
 function precise(value: number): number {
@@ -116,12 +118,29 @@ function summarize(
   priceStep: number,
   quality: FootprintQuality,
 ): FootprintCandle {
-  const totalBidVolume = rows.reduce((sum, row) => sum + row.bidVolume, 0);
-  const totalAskVolume = rows.reduce((sum, row) => sum + row.askVolume, 0);
+  let totalBidVolume = 0;
+  let totalAskVolume = 0;
+  let tradeCount = 0;
+  let maxDelta = Number.NEGATIVE_INFINITY;
+  let minDelta = Number.POSITIVE_INFINITY;
+  let poc: FootprintRow | undefined;
+  let valueAreaHigh: number | undefined;
+  let valueAreaLow: number | undefined;
+
+  for (const row of rows) {
+    totalBidVolume += row.bidVolume;
+    totalAskVolume += row.askVolume;
+    tradeCount += row.tradeCount;
+    if (row.delta > maxDelta) maxDelta = row.delta;
+    if (row.delta < minDelta) minDelta = row.delta;
+    if (!poc || row.totalVolume > poc.totalVolume) poc = row;
+    if (row.inValueArea) {
+      valueAreaHigh = valueAreaHigh === undefined ? row.price : Math.max(valueAreaHigh, row.price);
+      valueAreaLow = valueAreaLow === undefined ? row.price : Math.min(valueAreaLow, row.price);
+    }
+  }
+
   const totalVolume = totalBidVolume + totalAskVolume;
-  const area = valueArea(rows);
-  const poc = rows.reduce<FootprintRow | undefined>((best, row) => !best || row.totalVolume > best.totalVolume ? row : best, undefined);
-  const deltas = rows.map((row) => row.delta);
   return {
     time: candle.time,
     endTime: candle.endTime,
@@ -130,12 +149,12 @@ function summarize(
     totalAskVolume,
     totalVolume,
     delta: totalAskVolume - totalBidVolume,
-    maxDelta: deltas.length ? Math.max(...deltas) : 0,
-    minDelta: deltas.length ? Math.min(...deltas) : 0,
-    tradeCount: rows.reduce((sum, row) => sum + row.tradeCount, 0),
+    maxDelta: Number.isFinite(maxDelta) ? maxDelta : 0,
+    minDelta: Number.isFinite(minDelta) ? minDelta : 0,
+    tradeCount,
     pocPrice: poc?.price,
-    valueAreaHigh: area.high,
-    valueAreaLow: area.low,
+    valueAreaHigh,
+    valueAreaLow,
     coverageRatio: candle.volume > 0 ? totalVolume / candle.volume : undefined,
     quality,
     priceStep,
@@ -187,32 +206,71 @@ export class FootprintAccumulator {
     };
   }
 
-  reset(candles: Candle[], trades: Trade[] = [], input?: TradeCoverageInput, captureStart = Date.now()): void {
+  reset(
+    candles: Candle[],
+    trades: Trade[] = [],
+    input?: TradeCoverageInput,
+    captureStart = Date.now(),
+    seededFootprints: FootprintCandle[] = [],
+  ): void {
     this.candles.clear();
     this.captureStart = captureStart;
     this.gappedAt = undefined;
     this.latestTradeTime = 0;
     for (const candle of candles) this.upsertCandle(candle);
     this.coverage = {
-      quality: trades.length ? "live-partial" : "aggregate-only",
+      quality: seededFootprints.length ? (input?.contiguous === false ? "gapped" : "full") : trades.length ? "live-partial" : "aggregate-only",
       source: input?.source ?? (this.market.provider === "Binance" ? "binance-aggtrades" : "hyperliquid-live"),
       startTime: input?.startTime,
       endTime: input?.endTime,
       contiguous: input?.contiguous ?? true,
-      eventCount: input?.eventCount ?? trades.length,
-      detail: input?.detail ?? (trades.length ? "Price-level trades loaded" : "Aggregate candles only"),
+      eventCount: input?.eventCount ?? (seededFootprints.length ? seededFootprints.reduce((sum, item) => sum + item.tradeCount, 0) : trades.length),
+      detail: input?.detail ?? (seededFootprints.length ? "Precomputed price-level footprints loaded" : trades.length ? "Price-level trades loaded" : "Aggregate candles only"),
     };
-    for (const trade of trades) this.ingestTrade(trade, false);
+    this.seedFootprints(seededFootprints);
+    for (const trade of trades) {
+      if (seededFootprints.length && input?.endTime !== undefined && trade.exchangeTime <= input.endTime) continue;
+      this.ingestTrade(trade, false);
+    }
     if (this.coverage.startTime === undefined && trades.length) this.coverage.startTime = trades[0].exchangeTime;
     if (this.coverage.endTime === undefined && trades.length) this.coverage.endTime = trades.at(-1)?.exchangeTime;
   }
 
+  private seedFootprints(footprints: FootprintCandle[]): void {
+    for (const footprint of footprints) {
+      const bucket = this.candles.get(footprint.time);
+      if (!bucket) continue;
+      bucket.rows.clear();
+      for (const source of footprint.rows) {
+        bucket.rows.set(source.price, {
+          price: source.price,
+          bidVolume: source.bidVolume,
+          askVolume: source.askVolume,
+          bidTrades: source.bidTrades,
+          askTrades: source.askTrades,
+        });
+      }
+      bucket.cached = {
+        ...footprint,
+        rows: footprint.rows.map((source) => ({ ...source })),
+      };
+      bucket.dirty = false;
+    }
+  }
+
   upsertCandle(candle: Candle): void {
     const existing = this.candles.get(candle.time);
-    if (existing) existing.candle = candle;
-    else this.candles.set(candle.time, { candle, rows: new Map() });
+    if (existing) {
+      existing.candle = candle;
+      existing.dirty = true;
+    } else {
+      this.candles.set(candle.time, { candle, rows: new Map(), dirty: true });
+    }
     const keepAfter = candle.time - timeframeMs(this.timeframe) * 5000;
-    for (const time of this.candles.keys()) if (time < keepAfter) this.candles.delete(time);
+    for (const time of this.candles.keys()) {
+      if (time >= keepAfter) break;
+      this.candles.delete(time);
+    }
   }
 
   ingestTrade(trade: Trade, countEvent = true): void {
@@ -229,7 +287,7 @@ export class FootprintAccumulator {
         close: trade.price,
         volume: 0,
       };
-      bucket = { candle, rows: new Map() };
+      bucket = { candle, rows: new Map(), dirty: true };
       this.candles.set(time, bucket);
     }
     const step = this.market.tickSize;
@@ -238,6 +296,7 @@ export class FootprintAccumulator {
     if (trade.side === "buy") { row.askVolume += trade.size; row.askTrades += 1; }
     else { row.bidVolume += trade.size; row.bidTrades += 1; }
     bucket.rows.set(price, row);
+    bucket.dirty = true;
     this.latestTradeTime = Math.max(this.latestTradeTime, trade.exchangeTime);
     this.coverage.endTime = Math.max(this.coverage.endTime ?? 0, trade.exchangeTime);
     if (this.coverage.startTime === undefined) this.coverage.startTime = trade.exchangeTime;
@@ -253,27 +312,38 @@ export class FootprintAccumulator {
   }
 
   snapshot(now = Date.now(), replay = false): { footprints: FootprintCandle[]; coverage: FootprintCoverage } {
-    const footprints = [...this.candles.values()]
-      .sort((a, b) => a.candle.time - b.candle.time)
-      .map(({ candle, rows }) => {
-        const derived = deriveRows(rows.values(), this.market.tickSize, this.market.footprintImbalanceRatio, this.market.footprintMinVolume);
-        const quality = this.qualityFor(candle, derived, now, replay);
-        return summarize(candle, derived, this.market.tickSize, quality);
-      });
+    const footprints = [...this.candles.values()].map((bucket) => {
+      let footprint = bucket.cached;
+      if (!footprint || bucket.dirty) {
+        const derived = deriveRows(bucket.rows.values(), this.market.tickSize, this.market.footprintImbalanceRatio, this.market.footprintMinVolume);
+        const quality = this.qualityFor(bucket.candle, derived, now, replay);
+        footprint = summarize(bucket.candle, derived, this.market.tickSize, quality);
+        bucket.cached = footprint;
+        bucket.dirty = false;
+      } else {
+        const quality = this.qualityFor(bucket.candle, footprint.rows, now, replay);
+        if (quality !== footprint.quality) {
+          footprint = { ...footprint, quality };
+          bucket.cached = footprint;
+        }
+      }
+      return footprint;
+    });
     const qualities = footprints.slice(-20).map((item) => item.quality);
     const quality: FootprintQuality = qualities.includes("gapped") ? "gapped"
       : qualities.includes("live-partial") ? "live-partial"
         : qualities.some((item) => item === "full" || item === "replay-full") ? (replay ? "replay-full" : "full")
           : "aggregate-only";
+    const collectorDetail = this.coverage.source === "collector-api" ? this.coverage.detail : undefined;
     return {
       footprints,
       coverage: {
         ...this.coverage,
         quality,
         endTime: Math.max(this.coverage.endTime ?? 0, this.latestTradeTime) || this.coverage.endTime,
-        detail: quality === "full" ? "Contiguous Binance aggregate trades reconcile to closed candles"
+        detail: quality === "full" ? (collectorDetail ?? "Contiguous Binance aggregate trades reconcile to closed candles")
           : quality === "replay-full" ? "Deterministic footprint rebuilt from replay events"
-            : quality === "live-partial" ? "Current or first observed candle is partial"
+            : quality === "live-partial" ? (collectorDetail ?? "Current or first observed candle is partial")
               : quality === "gapped" ? this.coverage.detail
                 : "Historical candles lack price-level executions",
       },
@@ -290,11 +360,16 @@ export class FootprintAccumulator {
     if (coverageStart === undefined || coverageStart > candle.time) return "live-partial";
     if (candle.time < this.captureStart && coverageStart > candle.time) return "live-partial";
     if (coverageEnd < candle.endTime || candle.endTime >= now - 1500) return "live-partial";
-    const total = rows.reduce((sum, row) => sum + row.totalVolume, 0);
-    const ratio = candle.volume > 0 ? total / candle.volume : 1;
+    const ratio = candle.volume > 0 ? (bucketVolume(rows) / candle.volume) : 1;
     if (ratio < 0.97 || ratio > 1.03) return "gapped";
     return "full";
   }
+}
+
+function bucketVolume(rows: FootprintRow[]): number {
+  let total = 0;
+  for (const row of rows) total += row.totalVolume;
+  return total;
 }
 
 export function buildFootprints(

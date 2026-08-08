@@ -29,8 +29,10 @@ jobs:
         run: npm run build
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
-      - name: Run VeilFlow browser workflow
-        run: npx playwright test --project=desktop-chromium
+      - name: Run desktop workflow
+        run: npx playwright test tests/e2e/veilflow.spec.ts --project=desktop-chromium
+      - name: Run mobile performance workflow
+        run: npx playwright test tests/e2e/mobilePerformance.spec.ts --project=mobile-chromium
       - name: Upload browser evidence
         if: always()
         continue-on-error: true

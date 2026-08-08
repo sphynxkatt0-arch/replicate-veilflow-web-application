@@ -2,8 +2,11 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { FileEventLog, sha256 } from "./core.mjs";
 import { JsonDocumentStore, TelemetryStore, evaluateAlert, validateWorkspaceDocument } from "./control.mjs";
+import { buildFootprints, footprintCoverage } from "./footprints.mjs";
+import { FootprintStore, footprintCacheKey } from "./footprintStore.mjs";
 
-const TIMEFRAMES = Object.freeze({ "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000 });
+export { buildFootprints } from "./footprints.mjs";
+
 const MAX_BODY_BYTES = 10_000_000;
 
 function json(response, status, value) {
@@ -20,6 +23,12 @@ function text(response, status, body, contentType = "text/plain; charset=utf-8")
 function positiveInteger(value, fallback, maximum = 100_000) {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, maximum) : fallback;
+}
+
+function optionalNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 async function readJson(request) {
@@ -44,60 +53,10 @@ export function eventsToCsv(events) {
   return [headers.join(","), ...events.map((event) => headers.map((header) => csvCell(event[header])).join(","))].join("\n");
 }
 
-function groupPrice(price, tickSize) {
-  return Number((Math.round(price / tickSize) * tickSize).toPrecision(12));
-}
-
-export function buildFootprints(events, timeframe = "1m", tickSize = 0.01) {
-  const interval = TIMEFRAMES[timeframe];
-  if (!interval) throw new Error(`Unsupported timeframe ${timeframe}`);
-  const buckets = new Map();
-  let globalQuality = "FULL";
-  for (const event of events) {
-    if (event.eventType === "quality") {
-      globalQuality = event.payload?.to ?? event.quality;
-      continue;
-    }
-    if (event.eventType !== "trade") continue;
-    const time = Math.floor(event.exchangeTimestamp / interval) * interval;
-    let candle = buckets.get(time);
-    if (!candle) {
-      candle = { time, endTime: time + interval - 1, rows: new Map(), quality: globalQuality, eventCount: 0 };
-      buckets.set(time, candle);
-    }
-    const price = groupPrice(Number(event.payload.price), tickSize);
-    const size = Number(event.payload.size);
-    if (!Number.isFinite(price) || !Number.isFinite(size) || size < 0) continue;
-    const row = candle.rows.get(price) ?? { price, bidVolume: 0, askVolume: 0, tradeCount: 0 };
-    if (event.payload.side === "buy") row.askVolume += size; else row.bidVolume += size;
-    row.tradeCount += 1;
-    candle.rows.set(price, row);
-    candle.eventCount += 1;
-  }
-  return [...buckets.values()].sort((a, b) => a.time - b.time).map((candle) => {
-    const rows = [...candle.rows.values()].sort((a, b) => b.price - a.price).map((row) => ({ ...row, totalVolume: row.bidVolume + row.askVolume, delta: row.askVolume - row.bidVolume }));
-    const totalBidVolume = rows.reduce((sum, row) => sum + row.bidVolume, 0);
-    const totalAskVolume = rows.reduce((sum, row) => sum + row.askVolume, 0);
-    const poc = rows.reduce((best, row) => !best || row.totalVolume > best.totalVolume ? row : best, undefined);
-    return {
-      time: candle.time,
-      endTime: candle.endTime,
-      rows,
-      totalBidVolume,
-      totalAskVolume,
-      totalVolume: totalBidVolume + totalAskVolume,
-      delta: totalAskVolume - totalBidVolume,
-      pocPrice: poc?.price,
-      eventCount: candle.eventCount,
-      quality: candle.quality,
-      hash: sha256(rows),
-    };
-  });
-}
-
 export function createApiServer({ dataDir, port = Number(process.env.PORT || 8787), host = process.env.HOST || "127.0.0.1" } = {}) {
   const root = dataDir || process.env.VEILFLOW_DATA_DIR || join(process.cwd(), ".veilflow-data");
   const log = new FileEventLog(root);
+  const footprintStore = new FootprintStore(root);
   const workspaces = new JsonDocumentStore(root, "workspaces");
   const alerts = new JsonDocumentStore(root, "alerts");
   const telemetry = new TelemetryStore(root);
@@ -130,11 +89,46 @@ export function createApiServer({ dataDir, port = Number(process.env.PORT || 878
           return;
         }
         if (request.method === "GET" && parts[2] === "footprints") {
-          const events = await log.readEvents(sessionId);
           const timeframe = url.searchParams.get("timeframe") || "1m";
           const tickSize = Number(url.searchParams.get("tickSize") || "0.01");
-          const footprints = buildFootprints(events, timeframe, tickSize);
-          json(response, 200, { sessionId, timeframe, tickSize, footprintCount: footprints.length, outputHash: sha256(footprints), footprints });
+          const options = {
+            startTime: optionalNumber(url.searchParams.get("startTime")),
+            endTime: optionalNumber(url.searchParams.get("endTime")),
+            imbalanceRatio: optionalNumber(url.searchParams.get("imbalanceRatio")),
+            minVolume: optionalNumber(url.searchParams.get("minVolume")),
+            valueAreaRatio: optionalNumber(url.searchParams.get("valueAreaRatio")),
+          };
+          const manifest = await log.readManifest(sessionId);
+          const cacheable = manifest.status === "complete" && typeof manifest.eventHash === "string";
+          const key = cacheable ? footprintCacheKey({ sessionId, eventHash: manifest.eventHash, timeframe, tickSize, options }) : undefined;
+          if (key) {
+            const cached = await footprintStore.get(sessionId, key);
+            if (cached) {
+              json(response, 200, { ...cached.payload, cache: { state: "HIT", key, createdAt: cached.createdAt } });
+              return;
+            }
+          }
+
+          const events = await log.readEvents(sessionId);
+          const footprints = buildFootprints(events, timeframe, tickSize, options);
+          const coverage = footprintCoverage(events, footprints, options);
+          const payload = {
+            sessionId,
+            timeframe,
+            tickSize,
+            requestedStartTime: options.startTime,
+            requestedEndTime: options.endTime,
+            footprintCount: footprints.length,
+            coverage,
+            outputHash: sha256(footprints),
+            footprints,
+          };
+          if (key) {
+            const cached = await footprintStore.put(sessionId, key, { payload });
+            json(response, 200, { ...payload, cache: { state: "MISS", key, createdAt: cached.createdAt } });
+          } else {
+            json(response, 200, { ...payload, cache: { state: "BYPASS", reason: "session is still mutable" } });
+          }
           return;
         }
         if (request.method === "GET" && parts[2] === "verify") {

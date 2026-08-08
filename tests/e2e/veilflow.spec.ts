@@ -13,6 +13,12 @@ test("production-grade spot, perpetual, replay, and trust workflow", async ({ pa
   page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(`${message.location().url}: ${message.text()}`); });
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await installDeterministicBinance(page);
+  await page.addInitScript(() => {
+    // Regression fixture for the real blank-screen failure: older sessions persisted
+    // primitive values through an object-merging storage hook.
+    localStorage.setItem("vf-chart-mode", JSON.stringify("footprint"));
+    localStorage.setItem("vf-sidebar-width", JSON.stringify(420));
+  });
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("#root .vf-app")).toBeVisible();
