@@ -62,6 +62,7 @@ const HYPERLIQUID_WS = "wss://api.hyperliquid.xyz/ws";
 const MAX_AGG_TRADE_PAGES = 15;
 const AGG_TRADE_PAGE_SIZE = 1000;
 const HISTORICAL_SEQUENCE_BOUNDARIES = new Map<string, number>();
+const HISTORICAL_TIME_BOUNDARIES = new Map<string, number>();
 
 export function binanceApiConfig(market: MarketDefinition): BinanceApiConfig {
   return market.binanceProduct === "usdm" ? BINANCE_USDM : BINANCE_SPOT;
@@ -288,15 +289,21 @@ function mapHlMetrics(market: MarketDefinition, response: HlMetaCtx): MarketMetr
 async function loadHyperliquid(market: MarketDefinition, timeframe: Timeframe, signal?: AbortSignal): Promise<Snapshot> {
   const endTime = Date.now();
   const startTime = endTime - timeframeMs(timeframe) * 1003;
-  const [candles, book, contexts] = await Promise.all([
+  const [rawCandles, book, contexts] = await Promise.all([
     hyperliquidInfo<HlCandle[]>({ type: "candleSnapshot", req: { coin: market.providerSymbol, interval: timeframe, startTime, endTime } }, signal),
     hyperliquidInfo<HlBook>({ type: "l2Book", coin: market.providerSymbol }, signal),
     hyperliquidInfo<HlMetaCtx>({ type: "metaAndAssetCtxs", dex: "xyz" }, signal),
   ]);
+  const candles = rawCandles.map(mapHlCandle).sort((a, b) => a.time - b.time);
+  const serverFootprints = collectorConfigured() ? await loadCollectorFootprints(market, timeframe, candles, signal) : undefined;
+  const historicalBoundary = serverFootprints?.coverage.endTime;
+  if (historicalBoundary !== undefined) HISTORICAL_TIME_BOUNDARIES.set(market.key, historicalBoundary);
+  else HISTORICAL_TIME_BOUNDARIES.delete(market.key);
   return {
-    candles: candles.map(mapHlCandle).sort((a, b) => a.time - b.time),
+    candles,
     trades: [],
-    tradeCoverage: { source: "hyperliquid-live", contiguous: true, eventCount: 0, detail: "Hyperliquid footprint starts from live trades after connection" },
+    tradeCoverage: serverFootprints?.coverage ?? { source: "hyperliquid-live", contiguous: true, eventCount: 0, detail: "Hyperliquid footprint starts from live trades after connection" },
+    footprints: serverFootprints?.footprints,
     book: mapHlBook(book),
     metrics: mapHlMetrics(market, contexts),
   };
@@ -395,15 +402,11 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
         const exchangeTime = numberOr(data.T, numberOr(data.E, Date.now()));
         const historicalBoundary = HISTORICAL_SEQUENCE_BOUNDARIES.get(market.key);
         if (!historicalBoundaryChecked && historicalBoundary !== undefined) {
-          if (lastTradeSequence !== undefined && lastTradeSequence > historicalBoundary + 1) {
-            handlers.onTradeGap?.(exchangeTime, `Historical-live aggregate-trade gap: expected ${historicalBoundary + 1}, first live sequence ${lastTradeSequence}`);
-          }
+          if (lastTradeSequence !== undefined && lastTradeSequence > historicalBoundary + 1) handlers.onTradeGap?.(exchangeTime, `Historical-live aggregate-trade gap: expected ${historicalBoundary + 1}, first live sequence ${lastTradeSequence}`);
           if (lastTradeSequence === undefined || historicalBoundary > lastTradeSequence) lastTradeSequence = historicalBoundary;
           historicalBoundaryChecked = true;
         }
-        if (lastTradeSequence !== undefined && sequence > lastTradeSequence + 1) {
-          handlers.onTradeGap?.(exchangeTime, `Aggregate-trade gap: expected ${lastTradeSequence + 1}, received ${sequence}`);
-        }
+        if (lastTradeSequence !== undefined && sequence > lastTradeSequence + 1) handlers.onTradeGap?.(exchangeTime, `Aggregate-trade gap: expected ${lastTradeSequence + 1}, received ${sequence}`);
         if (lastTradeSequence !== undefined && sequence <= lastTradeSequence) return;
         lastTradeSequence = sequence;
         handlers.onTrade(mapBinanceAggTrade(market, {
@@ -464,6 +467,9 @@ function streamHyperliquid(market: MarketDefinition, timeframe: Timeframe, handl
       } else if (message.channel === "trades") {
         const rows = (Array.isArray(message.data) ? message.data : []) as Array<{ coin: string; side: string; px: string; sz: string; hash: string; time: number; tid: number }>;
         for (const raw of rows) {
+          const historicalBoundary = HISTORICAL_TIME_BOUNDARIES.get(market.key);
+          if (historicalBoundary !== undefined && raw.time <= historicalBoundary) continue;
+          if (historicalBoundary !== undefined && raw.time > historicalBoundary) HISTORICAL_TIME_BOUNDARIES.delete(market.key);
           const price = numberOr(raw.px); const size = numberOr(raw.sz);
           handlers.onTrade({
             id: `${raw.time}-${raw.coin}-${raw.tid}`,
