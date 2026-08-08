@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { collectorManifestMatchesMarket, parseCollectorFootprint } from "../collectorClient";
+import { collectorManifestMatchesMarket, collectorRequestWindow, parseCollectorFootprint } from "../collectorClient";
 import { MARKETS } from "../markets";
+import type { Candle } from "../types";
+
+function candles(count: number): Candle[] {
+  return Array.from({ length: count }, (_, index) => ({
+    time: index * 60_000,
+    endTime: index * 60_000 + 59_999,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: 100,
+    volume: 1,
+  }));
+}
 
 describe("collector session routing", () => {
   it("requires venue, symbol, and product type to match", () => {
@@ -12,6 +25,25 @@ describe("collector session routing", () => {
   it("routes Hyperliquid proxy instruments to perpetual collector sessions", () => {
     expect(collectorManifestMatchesMarket({ id: "hl", venue: "hyperliquid", venueSymbol: MARKETS.NQ.providerSymbol, productType: "perpetual" }, MARKETS.NQ)).toBe(true);
     expect(collectorManifestMatchesMarket({ id: "hl-wrong", venue: "binance", venueSymbol: MARKETS.NQ.providerSymbol, productType: "perpetual" }, MARKETS.NQ)).toBe(false);
+  });
+
+  it("bounds the initial collector payload to the latest 160 candles", () => {
+    const rows = candles(1_000);
+    const range = collectorRequestWindow(rows);
+    expect(range?.startTime).toBe(rows[840].time);
+    expect(range?.endTime).toBe(rows[999].endTime);
+  });
+
+  it("honors an explicit viewport range and clamps it to available candles", () => {
+    const rows = candles(500);
+    expect(collectorRequestWindow(rows, { startTime: rows[100].time, endTime: rows[220].endTime })).toEqual({
+      startTime: rows[100].time,
+      endTime: rows[220].endTime,
+    });
+    expect(collectorRequestWindow(rows, { startTime: -1_000, endTime: rows[50].endTime })).toEqual({
+      startTime: rows[0].time,
+      endTime: rows[50].endTime,
+    });
   });
 
   it("preserves trusted unfinished-auction evidence from server footprints", () => {
