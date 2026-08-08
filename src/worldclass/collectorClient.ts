@@ -51,6 +51,13 @@ export interface CollectorFootprintSnapshot {
   cacheState?: string;
 }
 
+export interface CollectorFootprintRange {
+  startTime: number;
+  endTime: number;
+}
+
+const INITIAL_FOOTPRINT_CANDLES = 160;
+
 function collectorBaseUrl(): string | undefined {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
   const configured = meta.env?.VITE_VEILFLOW_COLLECTOR_API
@@ -163,18 +170,33 @@ function overlap(manifest: CollectorManifest, startTime: number, endTime: number
   return Math.max(0, Math.min(end, endTime) - Math.max(start, startTime));
 }
 
+export function collectorRequestWindow(candles: Candle[], requested?: CollectorFootprintRange): CollectorFootprintRange | undefined {
+  if (!candles.length) return undefined;
+  const first = candles[0];
+  const last = candles.at(-1)!;
+  if (requested) {
+    const startTime = Math.max(first.time, Math.min(requested.startTime, requested.endTime));
+    const endTime = Math.min(last.endTime, Math.max(requested.startTime, requested.endTime));
+    return endTime >= startTime ? { startTime, endTime } : undefined;
+  }
+  const tail = candles.slice(-INITIAL_FOOTPRINT_CANDLES);
+  return { startTime: tail[0].time, endTime: tail.at(-1)!.endTime };
+}
+
 export async function loadCollectorFootprints(
   market: MarketDefinition,
   timeframe: Timeframe,
   candles: Candle[],
   signal?: AbortSignal,
+  requestedRange?: CollectorFootprintRange,
 ): Promise<CollectorFootprintSnapshot | undefined> {
   const base = collectorBaseUrl();
-  if (!base || !candles.length) return undefined;
+  const window = collectorRequestWindow(candles, requestedRange);
+  if (!base || !window) return undefined;
 
   try {
-    const requestedStart = candles[0].time;
-    const requestedEnd = candles.at(-1)?.endTime ?? Date.now();
+    const requestedStart = window.startTime;
+    const requestedEnd = window.endTime;
     const catalogue = await fetchCollector<{ sessions?: CollectorManifest[] }>(`${base}/sessions`, signal);
     const sessions = (catalogue.sessions ?? [])
       .filter((item) => item.status === "complete" && collectorManifestMatchesMarket(item, market) && overlap(item, requestedStart, requestedEnd) > 0)
