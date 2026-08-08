@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
-import { detectLargeTrades } from "./analytics";
 import { regroupFootprint } from "./footprint";
 import { clamp, formatCompact, formatNotional, formatPrice, formatTime } from "./format";
 import { groupBook } from "./orderBook";
 import { resolveFootprintSemanticZoom, semanticDisplayStep } from "./semanticZoom";
 import { buildUnfinishedAuctionLevels } from "./unfinishedAuction";
+import { useLargeTradeAnalysis } from "./useLargeTradeAnalysis";
 import type { Candle, ChartMode, FootprintCandle, FootprintQuality, MarketState } from "./types";
 
 interface ChartSettings {
@@ -145,7 +145,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
   const start = Math.max(0, end - bars);
   const visible = useMemo(() => state.candles.slice(start, end), [state.candles, start, end]);
   const footprintByTime = useMemo(() => new Map(state.footprints.map((item) => [item.time, item])), [state.footprints]);
-  const large = useMemo(() => detectLargeTrades(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000), [state.trades, state.market.key]);
+  const large = useLargeTradeAnalysis(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000);
   const groupedBook = useMemo(() => groupBook(state.book, Math.max(state.market.tickSize, (state.book?.asks[0]?.price ?? 1) * 0.00005), 22), [state.book, state.market.tickSize]);
   const semanticPreview = useMemo(() => resolveFootprintSemanticZoom((size.width - 78) / Math.max(1, visible.length)), [size.width, visible.length]);
   const auctionLevels = useMemo(() => buildUnfinishedAuctionLevels(state.footprints, state.candles), [state.footprints, state.candles]);
