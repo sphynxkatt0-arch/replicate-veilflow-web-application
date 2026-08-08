@@ -15,7 +15,8 @@
     "collector": "node services/collector/runtime.mjs",
     "collector:api": "node services/collector/api.mjs",
     "collector:gateway": "node services/collector/gateway.mjs",
-    "collector:backfill": "node services/collector/history.mjs"
+    "collector:backfill": "node services/collector/history.mjs",
+    "collector:backfill:hyperliquid": "node services/collector/hyperliquidHistory.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.1.1",
