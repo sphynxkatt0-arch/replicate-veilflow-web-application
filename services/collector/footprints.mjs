@@ -236,11 +236,9 @@ export function footprintCoverage(events, footprints, options = {}) {
     if (options.endTime !== undefined && event.exchangeTimestamp > Number(options.endTime)) return false;
     return true;
   });
-  const qualityEvents = events.filter((event) => event.eventType === "quality");
   const qualities = footprints.map((footprint) => canonicalQuality(footprint.quality));
   let quality = qualities[0] ?? "UNAVAILABLE";
   for (const candidate of qualities.slice(1)) quality = weakerQuality(quality, candidate);
-  if (qualityEvents.some((event) => canonicalQuality(event.payload?.to ?? event.quality) === "GAPPED")) quality = weakerQuality(quality, "GAPPED");
 
   const first = tradeEvents[0];
   const last = tradeEvents.at(-1);
