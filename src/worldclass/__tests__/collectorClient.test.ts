@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectorManifestMatchesMarket } from "../collectorClient";
+import { collectorManifestMatchesMarket, parseCollectorFootprint } from "../collectorClient";
 import { MARKETS } from "../markets";
 
 describe("collector session routing", () => {
@@ -12,5 +12,43 @@ describe("collector session routing", () => {
   it("routes Hyperliquid proxy instruments to perpetual collector sessions", () => {
     expect(collectorManifestMatchesMarket({ id: "hl", venue: "hyperliquid", venueSymbol: MARKETS.NQ.providerSymbol, productType: "perpetual" }, MARKETS.NQ)).toBe(true);
     expect(collectorManifestMatchesMarket({ id: "hl-wrong", venue: "binance", venueSymbol: MARKETS.NQ.providerSymbol, productType: "perpetual" }, MARKETS.NQ)).toBe(false);
+  });
+
+  it("preserves trusted unfinished-auction evidence from server footprints", () => {
+    const parsed = parseCollectorFootprint({
+      time: 0,
+      endTime: 59_999,
+      priceStep: 1,
+      quality: "FULL",
+      totalBidVolume: 2,
+      totalAskVolume: 3,
+      totalVolume: 5,
+      delta: 1,
+      maxDelta: 1,
+      minDelta: 1,
+      tradeCount: 2,
+      unfinishedHigh: true,
+      unfinishedHighPrice: 102,
+      unfinishedLow: false,
+      rows: [{ price: 102, bidVolume: 2, askVolume: 3, totalVolume: 5, delta: 1, tradeCount: 2, bidTrades: 1, askTrades: 1 }],
+    });
+    expect(parsed?.unfinishedHigh).toBe(true);
+    expect(parsed?.unfinishedHighPrice).toBe(102);
+    expect(parsed?.unfinishedLow).toBe(false);
+  });
+
+  it("drops unfinished-auction claims when server footprint quality is not trusted", () => {
+    const parsed = parseCollectorFootprint({
+      time: 0,
+      endTime: 59_999,
+      priceStep: 1,
+      quality: "GAPPED",
+      unfinishedHigh: true,
+      unfinishedHighPrice: 102,
+      rows: [{ price: 102, bidVolume: 2, askVolume: 3 }],
+    });
+    expect(parsed?.quality).toBe("gapped");
+    expect(parsed?.unfinishedHigh).toBeUndefined();
+    expect(parsed?.unfinishedHighPrice).toBeUndefined();
   });
 });
