@@ -69,6 +69,10 @@ function optionalFinite(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function optionalBoolean(value: unknown): boolean | undefined {
+  return value === true ? true : value === false ? false : undefined;
+}
+
 function quality(value: unknown): FootprintQuality {
   const normalized = String(value ?? "").trim().replaceAll("_", " ").replaceAll("-", " ").toUpperCase();
   if (normalized === "FULL") return "full";
@@ -103,7 +107,7 @@ function row(value: unknown): FootprintRow | undefined {
   };
 }
 
-function footprint(value: unknown): FootprintCandle | undefined {
+export function parseCollectorFootprint(value: unknown): FootprintCandle | undefined {
   if (!value || typeof value !== "object") return undefined;
   const source = value as Record<string, unknown>;
   const time = finite(source.time, Number.NaN);
@@ -113,10 +117,8 @@ function footprint(value: unknown): FootprintCandle | undefined {
   const rows = source.rows.map(row).filter((item): item is FootprintRow => item !== undefined);
   const totalBidVolume = Math.max(0, finite(source.totalBidVolume, rows.reduce((sum, item) => sum + item.bidVolume, 0)));
   const totalAskVolume = Math.max(0, finite(source.totalAskVolume, rows.reduce((sum, item) => sum + item.askVolume, 0)));
-  const optional = (input: unknown) => {
-    const parsed = finite(input, Number.NaN);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  };
+  const parsedQuality = quality(source.quality);
+  const trustedAuction = parsedQuality === "full" || parsedQuality === "replay-full";
   return {
     time,
     endTime,
@@ -128,11 +130,15 @@ function footprint(value: unknown): FootprintCandle | undefined {
     maxDelta: finite(source.maxDelta),
     minDelta: finite(source.minDelta),
     tradeCount: Math.max(0, Math.trunc(finite(source.tradeCount, rows.reduce((sum, item) => sum + item.tradeCount, 0)))),
-    pocPrice: optional(source.pocPrice),
-    valueAreaHigh: optional(source.valueAreaHigh),
-    valueAreaLow: optional(source.valueAreaLow),
-    coverageRatio: optional(source.coverageRatio),
-    quality: quality(source.quality),
+    pocPrice: optionalFinite(source.pocPrice),
+    valueAreaHigh: optionalFinite(source.valueAreaHigh),
+    valueAreaLow: optionalFinite(source.valueAreaLow),
+    coverageRatio: optionalFinite(source.coverageRatio),
+    unfinishedHigh: trustedAuction ? optionalBoolean(source.unfinishedHigh) : undefined,
+    unfinishedLow: trustedAuction ? optionalBoolean(source.unfinishedLow) : undefined,
+    unfinishedHighPrice: trustedAuction ? optionalFinite(source.unfinishedHighPrice) : undefined,
+    unfinishedLowPrice: trustedAuction ? optionalFinite(source.unfinishedLowPrice) : undefined,
+    quality: parsedQuality,
     priceStep,
   };
 }
@@ -192,7 +198,7 @@ export async function loadCollectorFootprints(
       minVolume: String(market.footprintMinVolume),
     });
     const response = await fetchCollector<CollectorFootprintResponse>(`${base}/sessions/${encodeURIComponent(selected.id)}/footprints?${query}`, signal);
-    const footprints = (response.footprints ?? []).map(footprint).filter((item): item is FootprintCandle => item !== undefined);
+    const footprints = (response.footprints ?? []).map(parseCollectorFootprint).filter((item): item is FootprintCandle => item !== undefined);
     if (!footprints.length) return undefined;
 
     const coverageQuality = quality(response.coverage?.quality);
