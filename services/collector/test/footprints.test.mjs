@@ -69,6 +69,8 @@ test("quality transitions propagate into historical footprint coverage", () => {
   assert.equal(coverage.eventCount, 2);
   assert.equal(coverage.availableStartTime, 1_000);
   assert.equal(coverage.availableEndTime, 3_000);
+  assert.equal(coverage.firstSequence, "1");
+  assert.equal(coverage.lastSequence, "3");
 });
 
 test("recovered quality before a requested range does not poison later coverage", () => {
@@ -91,7 +93,10 @@ test("historical range filtering does not leak trades outside the request", () =
     trade("3", 121_000, 102, 3, "sell"),
   ];
   const footprints = buildFootprints(events, "1m", 1, { startTime: 60_000, endTime: 119_999 });
+  const coverage = footprintCoverage(events, footprints, { startTime: 60_000, endTime: 119_999 });
   assert.equal(footprints.length, 1);
   assert.equal(footprints[0].time, 60_000);
   assert.equal(footprints[0].totalVolume, 2);
+  assert.equal(coverage.firstSequence, "2");
+  assert.equal(coverage.lastSequence, "2");
 });
