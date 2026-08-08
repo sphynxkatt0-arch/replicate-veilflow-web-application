@@ -3,7 +3,6 @@ import { readdir, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { FileEventLog, normalizedEvent, sha256 } from "./core.mjs";
 
 const RANGE_TOLERANCE_MS = 2_000;
@@ -87,7 +86,8 @@ export function extractHyperliquidRecord(record) {
   if (!record || typeof record !== "object") return { block: undefined, executions: [] };
   if (Array.isArray(record.events)) {
     const blockTime = parseHyperliquidTime(record.block_time ?? record.local_time);
-    const blockNumber = finite(record.block_number, undefined);
+    const parsedBlockNumber = finite(record.block_number);
+    const blockNumber = Number.isFinite(parsedBlockNumber) ? parsedBlockNumber : undefined;
     const executions = [];
     for (const rawEvent of record.events) {
       const fill = eventFill(rawEvent);
@@ -99,18 +99,12 @@ export function extractHyperliquidRecord(record) {
         sourceFormat: "node_fills_by_block",
       }));
     }
-    return {
-      block: { number: blockNumber, time: blockTime },
-      executions,
-    };
+    return { block: { number: blockNumber, time: blockTime }, executions };
   }
 
   const fill = eventFill(record);
   if (!fill) return { block: undefined, executions: [] };
-  return {
-    block: undefined,
-    executions: [normalizeExecution(fill, { sourceFormat: fill.tid !== undefined ? "node_fills" : "node_trades" })],
-  };
+  return { block: undefined, executions: [normalizeExecution(fill, { sourceFormat: fill.tid !== undefined ? "node_fills" : "node_trades" })] };
 }
 
 async function inputFiles(inputPath) {
@@ -132,33 +126,35 @@ async function inputFiles(inputPath) {
   return files;
 }
 
-async function lineStream(path) {
-  if (!path.toLowerCase().endsWith(".lz4")) return { stream: createReadStream(path, { encoding: "utf8" }) };
+function lineStream(path) {
+  if (!path.toLowerCase().endsWith(".lz4")) return { stream: createReadStream(path, { encoding: "utf8" }), done: Promise.resolve() };
   const child = spawn(process.env.VEILFLOW_LZ4_BIN || "lz4", ["-dc", path], { stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  child.on("error", (error) => child.stdout.destroy(new Error(`Unable to launch lz4 for ${basename(path)}: ${error.message}`)));
-  return { stream: child.stdout, child, stderr: () => stderr };
+  const done = new Promise((resolveDone, rejectDone) => {
+    child.once("error", (error) => rejectDone(new Error(`Unable to launch lz4 for ${basename(path)}: ${error.message}`)));
+    child.once("close", (code) => code === 0 ? resolveDone() : rejectDone(new Error(`lz4 failed for ${basename(path)} with exit ${code}: ${stderr.trim()}`)));
+  });
+  return { stream: child.stdout, done };
 }
 
 async function consumeFile(path, onRecord) {
-  const source = await lineStream(path);
+  const source = lineStream(path);
   const lines = createInterface({ input: source.stream, crlfDelay: Infinity });
   let lineNumber = 0;
-  for await (const line of lines) {
-    lineNumber += 1;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let parsed;
-    try { parsed = JSON.parse(trimmed); }
-    catch (error) { throw new Error(`${basename(path)}:${lineNumber}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-    await onRecord(parsed, { path, lineNumber });
-  }
-  if (source.child) {
-    const [code] = await once(source.child, "close");
-    if (code !== 0) throw new Error(`lz4 failed for ${basename(path)} with exit ${code}: ${source.stderr?.().trim() ?? ""}`);
-  }
+  try {
+    for await (const line of lines) {
+      lineNumber += 1;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let parsed;
+      try { parsed = JSON.parse(trimmed); }
+      catch (error) { throw new Error(`${basename(path)}:${lineNumber}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+      await onRecord(parsed, { path, lineNumber });
+    }
+    await source.done;
+  } finally { lines.close(); }
 }
 
 function qualityEvent(context, exchangeTimestamp, id, reason, payload = {}) {
@@ -215,20 +211,19 @@ export async function collectHyperliquidNodeHistory({ inputPath, venueSymbol, st
   const executions = new Map();
   const blocks = new Map();
   let legacyRecordCount = 0;
-  let rawExecutionCount = 0;
+  let selectedRawExecutionCount = 0;
 
   for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
     const path = files[fileIndex];
     await consumeFile(path, (record) => {
       const parsed = extractHyperliquidRecord(record);
-      if (parsed.block?.number !== undefined && Number.isFinite(parsed.block.number)) {
-        blocks.set(parsed.block.number, parsed.block.time);
-      } else if (parsed.executions.length) legacyRecordCount += 1;
+      if (parsed.block?.number !== undefined && Number.isFinite(parsed.block.number)) blocks.set(parsed.block.number, parsed.block.time);
+      else if (parsed.executions.length) legacyRecordCount += 1;
       for (const execution of parsed.executions) {
-        rawExecutionCount += 1;
         if (execution.coin.toLowerCase() !== String(venueSymbol).toLowerCase()) continue;
         if (requestedStart !== undefined && execution.time < requestedStart) continue;
         if (requestedEnd !== undefined && execution.time > requestedEnd) continue;
+        selectedRawExecutionCount += 1;
         const existing = executions.get(execution.key);
         if (!existing || (existing.crossed !== true && execution.crossed === true)) executions.set(execution.key, execution);
       }
@@ -248,19 +243,15 @@ export async function collectHyperliquidNodeHistory({ inputPath, venueSymbol, st
   const firstBlockTime = orderedBlocks[0]?.[1];
   const lastBlockTime = orderedBlocks.at(-1)?.[1];
   const rangeGaps = [];
-  if (requestedStart !== undefined && firstBlockTime !== undefined && firstBlockTime > requestedStart + RANGE_TOLERANCE_MS) {
-    rangeGaps.push({ kind: "start", requested: requestedStart, available: firstBlockTime, time: rows[0]?.time ?? firstBlockTime });
-  }
-  if (requestedEnd !== undefined && lastBlockTime !== undefined && lastBlockTime < requestedEnd - RANGE_TOLERANCE_MS) {
-    rangeGaps.push({ kind: "end", requested: requestedEnd, available: lastBlockTime, time: rows.at(-1)?.time ?? lastBlockTime });
-  }
+  if (requestedStart !== undefined && firstBlockTime !== undefined && firstBlockTime > requestedStart + RANGE_TOLERANCE_MS) rangeGaps.push({ kind: "start", requested: requestedStart, available: firstBlockTime, time: rows[0]?.time ?? firstBlockTime });
+  if (requestedEnd !== undefined && lastBlockTime !== undefined && lastBlockTime < requestedEnd - RANGE_TOLERANCE_MS) rangeGaps.push({ kind: "end", requested: requestedEnd, available: lastBlockTime, time: rows.at(-1)?.time ?? lastBlockTime });
   const continuityVerifiable = orderedBlocks.length > 0 && legacyRecordCount === 0;
   const contiguous = continuityVerifiable && blockGaps.length === 0 && rangeGaps.length === 0;
 
   return {
     files,
     rows,
-    rawExecutionCount,
+    rawExecutionCount: selectedRawExecutionCount,
     blockCount: orderedBlocks.length,
     firstBlock: orderedBlocks[0]?.[0],
     lastBlock: orderedBlocks.at(-1)?.[0],
@@ -270,21 +261,11 @@ export async function collectHyperliquidNodeHistory({ inputPath, venueSymbol, st
     rangeGaps,
     continuityVerifiable,
     contiguous,
-    duplicateCount: Math.max(0, rawExecutionCount - rows.length),
+    duplicateCount: Math.max(0, selectedRawExecutionCount - rows.length),
   };
 }
 
-export async function backfillHyperliquidHistory({
-  dataDir,
-  inputPath,
-  sessionId,
-  venueSymbol,
-  symbol,
-  productType = "perpetual",
-  startTime,
-  endTime,
-  onProgress,
-} = {}) {
+export async function backfillHyperliquidHistory({ dataDir, inputPath, sessionId, venueSymbol, symbol, productType = "perpetual", startTime, endTime, onProgress } = {}) {
   const context = {
     venueSymbol: String(venueSymbol || "xyz:XYZ100"),
     symbol: String(symbol || venueSymbol || "XYZ100"),
@@ -318,33 +299,14 @@ export async function backfillHyperliquidHistory({
   });
 
   const events = [];
-  if (!result.continuityVerifiable) {
-    events.push(qualityEvent(context, result.rows[0].time, "legacy-unverified", "Hyperliquid legacy node history has no block-by-block continuity evidence"));
-  }
-  for (const gap of result.blockGaps) {
-    events.push(qualityEvent(context, gap.time, `block-gap-${gap.expected}-${gap.received}`, "Hyperliquid node block gap", { expectedBlock: gap.expected, receivedBlock: gap.received }));
-  }
-  for (const gap of result.rangeGaps) {
-    events.push(qualityEvent(context, gap.time, `range-${gap.kind}`, `Hyperliquid requested ${gap.kind} coverage is incomplete`, gap));
-  }
+  if (!result.continuityVerifiable) events.push(qualityEvent(context, result.rows[0].time, "legacy-unverified", "Hyperliquid legacy node history has no block-by-block continuity evidence"));
+  for (const gap of result.blockGaps) events.push(qualityEvent(context, gap.time, `block-gap-${gap.expected}-${gap.received}`, "Hyperliquid node block gap", { expectedBlock: gap.expected, receivedBlock: gap.received }));
+  for (const gap of result.rangeGaps) events.push(qualityEvent(context, gap.time, `range-${gap.kind}`, `Hyperliquid requested ${gap.kind} coverage is incomplete`, gap));
   for (const execution of result.rows) events.push(tradeEvent(context, execution, source));
   events.sort((left, right) => left.exchangeTimestamp - right.exchangeTimestamp || left.id.localeCompare(right.id));
   await log.append(id, events);
 
-  const analyticsHash = sha256({
-    source,
-    venueSymbol: context.venueSymbol,
-    requestedStart,
-    requestedEnd,
-    tradeCount: result.rows.length,
-    rawExecutionCount: result.rawExecutionCount,
-    duplicateCount: result.duplicateCount,
-    blockCount: result.blockCount,
-    firstBlock: result.firstBlock,
-    lastBlock: result.lastBlock,
-    blockGaps: result.blockGaps,
-    rangeGaps: result.rangeGaps,
-  });
+  const analyticsHash = sha256({ source, venueSymbol: context.venueSymbol, requestedStart, requestedEnd, tradeCount: result.rows.length, rawExecutionCount: result.rawExecutionCount, duplicateCount: result.duplicateCount, blockCount: result.blockCount, firstBlock: result.firstBlock, lastBlock: result.lastBlock, blockGaps: result.blockGaps, rangeGaps: result.rangeGaps });
   const manifest = await log.finalize(id, analyticsHash);
   return { sessionId: id, tradeCount: result.rows.length, manifest, ...result };
 }
@@ -366,15 +328,7 @@ async function main() {
       if (fileIndex === 1 || fileIndex === fileCount || fileIndex % 10 === 0) console.log(`[hyperliquid] files=${fileIndex}/${fileCount} executions=${executionCount} blocks=${blockCount}`);
     },
   });
-  console.log(JSON.stringify({
-    sessionId: result.sessionId,
-    tradeCount: result.tradeCount,
-    duplicateCount: result.duplicateCount,
-    blockCount: result.blockCount,
-    blockGapCount: result.blockGaps.length,
-    continuityVerifiable: result.continuityVerifiable,
-    contiguous: result.contiguous,
-  }, null, 2));
+  console.log(JSON.stringify({ sessionId: result.sessionId, tradeCount: result.tradeCount, duplicateCount: result.duplicateCount, blockCount: result.blockCount, blockGapCount: result.blockGaps.length, continuityVerifiable: result.continuityVerifiable, contiguous: result.contiguous }, null, 2));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
