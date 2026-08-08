@@ -61,6 +61,7 @@ const HYPERLIQUID_INFO = "https://api.hyperliquid.xyz/info";
 const HYPERLIQUID_WS = "wss://api.hyperliquid.xyz/ws";
 const MAX_AGG_TRADE_PAGES = 15;
 const AGG_TRADE_PAGE_SIZE = 1000;
+const HISTORICAL_SEQUENCE_BOUNDARIES = new Map<string, number>();
 
 export function binanceApiConfig(market: MarketDefinition): BinanceApiConfig {
   return market.binanceProduct === "usdm" ? BINANCE_USDM : BINANCE_SPOT;
@@ -238,6 +239,9 @@ async function loadBinance(market: MarketDefinition, timeframe: Timeframe, signa
   const candles = rows.map(binanceKline);
   const serverFootprints = collectorConfigured() ? await loadCollectorFootprints(market, timeframe, candles, signal) : undefined;
   const backfill = serverFootprints ? undefined : await loadRecentAggTrades(market, candles, timeframe, signal);
+  const boundary = serverFootprints?.coverage.endSequence ?? backfill?.trades.at(-1)?.sequence;
+  if (boundary !== undefined) HISTORICAL_SEQUENCE_BOUNDARIES.set(market.key, boundary);
+  else HISTORICAL_SEQUENCE_BOUNDARIES.delete(market.key);
   const local = new BinanceLocalBook();
   local.reset();
   local.applySnapshot(depth);
@@ -344,6 +348,7 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
   let metricsTimer: number | null = null;
   let controller: ProviderController | null = null;
   let lastTradeSequence: number | undefined;
+  let historicalBoundaryChecked = false;
 
   const syncSnapshot = async () => {
     if (resyncing) return;
@@ -388,6 +393,14 @@ function streamBinance(market: MarketDefinition, timeframe: Timeframe, handlers:
       } else if (stream.includes("@aggTrade")) {
         const sequence = numberOr(data.a);
         const exchangeTime = numberOr(data.T, numberOr(data.E, Date.now()));
+        const historicalBoundary = HISTORICAL_SEQUENCE_BOUNDARIES.get(market.key);
+        if (!historicalBoundaryChecked && historicalBoundary !== undefined) {
+          if (lastTradeSequence !== undefined && lastTradeSequence > historicalBoundary + 1) {
+            handlers.onTradeGap?.(exchangeTime, `Historical-live aggregate-trade gap: expected ${historicalBoundary + 1}, first live sequence ${lastTradeSequence}`);
+          }
+          if (lastTradeSequence === undefined || historicalBoundary > lastTradeSequence) lastTradeSequence = historicalBoundary;
+          historicalBoundaryChecked = true;
+        }
         if (lastTradeSequence !== undefined && sequence > lastTradeSequence + 1) {
           handlers.onTradeGap?.(exchangeTime, `Aggregate-trade gap: expected ${lastTradeSequence + 1}, received ${sequence}`);
         }
