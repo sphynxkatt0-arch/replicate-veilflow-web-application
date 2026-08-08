@@ -293,9 +293,12 @@ export function useMarketEngine(): EngineApi {
       model.book = snapshot.book ?? model.book;
       model.metrics = snapshot.metrics;
       model.status = "syncing";
-      model.statusDetail = `Historical snapshot and ${snapshot.trades.length.toLocaleString()} aggregate trades loaded; synchronizing live stream`;
+      const serverFootprintCount = snapshot.footprints?.length ?? 0;
+      model.statusDetail = serverFootprintCount
+        ? `Historical snapshot and ${serverFootprintCount.toLocaleString()} server footprints loaded; synchronizing live stream`
+        : `Historical snapshot and ${snapshot.trades.length.toLocaleString()} aggregate trades loaded; synchronizing live stream`;
       model.lastEventAt = Math.max(snapshot.tradeCoverage.endTime ?? 0, Date.now());
-      footprintRef.current.reset(model.candles, model.trades, snapshot.tradeCoverage, Date.now());
+      footprintRef.current.reset(model.candles, model.trades, snapshot.tradeCoverage, Date.now(), snapshot.footprints ?? []);
       if (market.provider === "Binance") {
         const gap = sequenceGap(model.trades);
         if (gap) {
