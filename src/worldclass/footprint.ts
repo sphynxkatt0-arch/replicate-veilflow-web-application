@@ -206,24 +206,56 @@ export class FootprintAccumulator {
     };
   }
 
-  reset(candles: Candle[], trades: Trade[] = [], input?: TradeCoverageInput, captureStart = Date.now()): void {
+  reset(
+    candles: Candle[],
+    trades: Trade[] = [],
+    input?: TradeCoverageInput,
+    captureStart = Date.now(),
+    seededFootprints: FootprintCandle[] = [],
+  ): void {
     this.candles.clear();
     this.captureStart = captureStart;
     this.gappedAt = undefined;
     this.latestTradeTime = 0;
     for (const candle of candles) this.upsertCandle(candle);
     this.coverage = {
-      quality: trades.length ? "live-partial" : "aggregate-only",
+      quality: seededFootprints.length ? (input?.contiguous === false ? "gapped" : "full") : trades.length ? "live-partial" : "aggregate-only",
       source: input?.source ?? (this.market.provider === "Binance" ? "binance-aggtrades" : "hyperliquid-live"),
       startTime: input?.startTime,
       endTime: input?.endTime,
       contiguous: input?.contiguous ?? true,
-      eventCount: input?.eventCount ?? trades.length,
-      detail: input?.detail ?? (trades.length ? "Price-level trades loaded" : "Aggregate candles only"),
+      eventCount: input?.eventCount ?? (seededFootprints.length ? seededFootprints.reduce((sum, item) => sum + item.tradeCount, 0) : trades.length),
+      detail: input?.detail ?? (seededFootprints.length ? "Precomputed price-level footprints loaded" : trades.length ? "Price-level trades loaded" : "Aggregate candles only"),
     };
-    for (const trade of trades) this.ingestTrade(trade, false);
+    this.seedFootprints(seededFootprints);
+    for (const trade of trades) {
+      if (seededFootprints.length && input?.endTime !== undefined && trade.exchangeTime <= input.endTime) continue;
+      this.ingestTrade(trade, false);
+    }
     if (this.coverage.startTime === undefined && trades.length) this.coverage.startTime = trades[0].exchangeTime;
     if (this.coverage.endTime === undefined && trades.length) this.coverage.endTime = trades.at(-1)?.exchangeTime;
+  }
+
+  private seedFootprints(footprints: FootprintCandle[]): void {
+    for (const footprint of footprints) {
+      const bucket = this.candles.get(footprint.time);
+      if (!bucket) continue;
+      bucket.rows.clear();
+      for (const source of footprint.rows) {
+        bucket.rows.set(source.price, {
+          price: source.price,
+          bidVolume: source.bidVolume,
+          askVolume: source.askVolume,
+          bidTrades: source.bidTrades,
+          askTrades: source.askTrades,
+        });
+      }
+      bucket.cached = {
+        ...footprint,
+        rows: footprint.rows.map((source) => ({ ...source })),
+      };
+      bucket.dirty = false;
+    }
   }
 
   upsertCandle(candle: Candle): void {
@@ -302,15 +334,16 @@ export class FootprintAccumulator {
       : qualities.includes("live-partial") ? "live-partial"
         : qualities.some((item) => item === "full" || item === "replay-full") ? (replay ? "replay-full" : "full")
           : "aggregate-only";
+    const collectorDetail = this.coverage.source === "collector-api" ? this.coverage.detail : undefined;
     return {
       footprints,
       coverage: {
         ...this.coverage,
         quality,
         endTime: Math.max(this.coverage.endTime ?? 0, this.latestTradeTime) || this.coverage.endTime,
-        detail: quality === "full" ? "Contiguous Binance aggregate trades reconcile to closed candles"
+        detail: quality === "full" ? (collectorDetail ?? "Contiguous Binance aggregate trades reconcile to closed candles")
           : quality === "replay-full" ? "Deterministic footprint rebuilt from replay events"
-            : quality === "live-partial" ? "Current or first observed candle is partial"
+            : quality === "live-partial" ? (collectorDetail ?? "Current or first observed candle is partial")
               : quality === "gapped" ? this.coverage.detail
                 : "Historical candles lack price-level executions",
       },
