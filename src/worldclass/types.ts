@@ -87,6 +87,11 @@ export interface FootprintCandle {
   valueAreaHigh?: number;
   valueAreaLow?: number;
   coverageRatio?: number;
+  /** Confirmed only when execution coverage for the candle is FULL/replay-full. */
+  unfinishedHigh?: boolean;
+  unfinishedLow?: boolean;
+  unfinishedHighPrice?: number;
+  unfinishedLowPrice?: number;
   quality: FootprintQuality;
   priceStep: number;
 }

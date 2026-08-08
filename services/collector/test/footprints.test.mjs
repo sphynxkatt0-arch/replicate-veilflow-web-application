@@ -56,6 +56,32 @@ test("server footprints expose full professional row schema", () => {
   assert.match(footprint.hash, /^sha256:/);
 });
 
+test("server marks nonzero Bid and Ask at a FULL extreme as unfinished auction", () => {
+  const events = [
+    trade("1", 1_000, 100, 5, "sell"),
+    trade("2", 2_000, 102, 2, "sell"),
+    trade("3", 3_000, 102, 3, "buy"),
+  ];
+  const [footprint] = buildFootprints(events, "1m", 1);
+  assert.equal(footprint.quality, "FULL");
+  assert.equal(footprint.unfinishedHigh, true);
+  assert.equal(footprint.unfinishedHighPrice, 102);
+  assert.equal(footprint.unfinishedLow, false);
+  assert.equal(footprint.unfinishedLowPrice, undefined);
+});
+
+test("server suppresses unfinished-auction claims when the candle is GAPPED", () => {
+  const events = [
+    quality("gap", 500, "GAPPED"),
+    trade("1", 1_000, 100, 2, "sell", "GAPPED"),
+    trade("2", 2_000, 100, 3, "buy", "GAPPED"),
+  ];
+  const [footprint] = buildFootprints(events, "1m", 1);
+  assert.equal(footprint.quality, "GAPPED");
+  assert.equal(footprint.unfinishedHigh, undefined);
+  assert.equal(footprint.unfinishedLow, undefined);
+});
+
 test("quality transitions propagate into historical footprint coverage", () => {
   const events = [
     trade("1", 1_000, 100, 1, "buy"),

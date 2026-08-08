@@ -51,6 +51,13 @@ export interface CollectorFootprintSnapshot {
   cacheState?: string;
 }
 
+export interface CollectorFootprintRange {
+  startTime: number;
+  endTime: number;
+}
+
+const INITIAL_FOOTPRINT_CANDLES = 160;
+
 function collectorBaseUrl(): string | undefined {
   const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
   const configured = meta.env?.VITE_VEILFLOW_COLLECTOR_API
@@ -67,6 +74,10 @@ function finite(value: unknown, fallback = 0): number {
 function optionalFinite(value: unknown): number | undefined {
   const parsed = finite(value, Number.NaN);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return value === true ? true : value === false ? false : undefined;
 }
 
 function quality(value: unknown): FootprintQuality {
@@ -103,7 +114,7 @@ function row(value: unknown): FootprintRow | undefined {
   };
 }
 
-function footprint(value: unknown): FootprintCandle | undefined {
+export function parseCollectorFootprint(value: unknown): FootprintCandle | undefined {
   if (!value || typeof value !== "object") return undefined;
   const source = value as Record<string, unknown>;
   const time = finite(source.time, Number.NaN);
@@ -113,10 +124,8 @@ function footprint(value: unknown): FootprintCandle | undefined {
   const rows = source.rows.map(row).filter((item): item is FootprintRow => item !== undefined);
   const totalBidVolume = Math.max(0, finite(source.totalBidVolume, rows.reduce((sum, item) => sum + item.bidVolume, 0)));
   const totalAskVolume = Math.max(0, finite(source.totalAskVolume, rows.reduce((sum, item) => sum + item.askVolume, 0)));
-  const optional = (input: unknown) => {
-    const parsed = finite(input, Number.NaN);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  };
+  const parsedQuality = quality(source.quality);
+  const trustedAuction = parsedQuality === "full" || parsedQuality === "replay-full";
   return {
     time,
     endTime,
@@ -128,11 +137,15 @@ function footprint(value: unknown): FootprintCandle | undefined {
     maxDelta: finite(source.maxDelta),
     minDelta: finite(source.minDelta),
     tradeCount: Math.max(0, Math.trunc(finite(source.tradeCount, rows.reduce((sum, item) => sum + item.tradeCount, 0)))),
-    pocPrice: optional(source.pocPrice),
-    valueAreaHigh: optional(source.valueAreaHigh),
-    valueAreaLow: optional(source.valueAreaLow),
-    coverageRatio: optional(source.coverageRatio),
-    quality: quality(source.quality),
+    pocPrice: optionalFinite(source.pocPrice),
+    valueAreaHigh: optionalFinite(source.valueAreaHigh),
+    valueAreaLow: optionalFinite(source.valueAreaLow),
+    coverageRatio: optionalFinite(source.coverageRatio),
+    unfinishedHigh: trustedAuction ? optionalBoolean(source.unfinishedHigh) : undefined,
+    unfinishedLow: trustedAuction ? optionalBoolean(source.unfinishedLow) : undefined,
+    unfinishedHighPrice: trustedAuction ? optionalFinite(source.unfinishedHighPrice) : undefined,
+    unfinishedLowPrice: trustedAuction ? optionalFinite(source.unfinishedLowPrice) : undefined,
+    quality: parsedQuality,
     priceStep,
   };
 }
@@ -157,18 +170,33 @@ function overlap(manifest: CollectorManifest, startTime: number, endTime: number
   return Math.max(0, Math.min(end, endTime) - Math.max(start, startTime));
 }
 
+export function collectorRequestWindow(candles: Candle[], requested?: CollectorFootprintRange): CollectorFootprintRange | undefined {
+  if (!candles.length) return undefined;
+  const first = candles[0];
+  const last = candles.at(-1)!;
+  if (requested) {
+    const startTime = Math.max(first.time, Math.min(requested.startTime, requested.endTime));
+    const endTime = Math.min(last.endTime, Math.max(requested.startTime, requested.endTime));
+    return endTime >= startTime ? { startTime, endTime } : undefined;
+  }
+  const tail = candles.slice(-INITIAL_FOOTPRINT_CANDLES);
+  return { startTime: tail[0].time, endTime: tail.at(-1)!.endTime };
+}
+
 export async function loadCollectorFootprints(
   market: MarketDefinition,
   timeframe: Timeframe,
   candles: Candle[],
   signal?: AbortSignal,
+  requestedRange?: CollectorFootprintRange,
 ): Promise<CollectorFootprintSnapshot | undefined> {
   const base = collectorBaseUrl();
-  if (!base || !candles.length) return undefined;
+  const window = collectorRequestWindow(candles, requestedRange);
+  if (!base || !window) return undefined;
 
   try {
-    const requestedStart = candles[0].time;
-    const requestedEnd = candles.at(-1)?.endTime ?? Date.now();
+    const requestedStart = window.startTime;
+    const requestedEnd = window.endTime;
     const catalogue = await fetchCollector<{ sessions?: CollectorManifest[] }>(`${base}/sessions`, signal);
     const sessions = (catalogue.sessions ?? [])
       .filter((item) => item.status === "complete" && collectorManifestMatchesMarket(item, market) && overlap(item, requestedStart, requestedEnd) > 0)
@@ -192,7 +220,7 @@ export async function loadCollectorFootprints(
       minVolume: String(market.footprintMinVolume),
     });
     const response = await fetchCollector<CollectorFootprintResponse>(`${base}/sessions/${encodeURIComponent(selected.id)}/footprints?${query}`, signal);
-    const footprints = (response.footprints ?? []).map(footprint).filter((item): item is FootprintCandle => item !== undefined);
+    const footprints = (response.footprints ?? []).map(parseCollectorFootprint).filter((item): item is FootprintCandle => item !== undefined);
     if (!footprints.length) return undefined;
 
     const coverageQuality = quality(response.coverage?.quality);
