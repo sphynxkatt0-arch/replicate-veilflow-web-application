@@ -62,6 +62,17 @@ export function mergeViewportFootprints(
     .sort((left, right) => left.time - right.time);
 }
 
+export function mergeRenderFootprints(live: FootprintCandle[], viewport: FootprintCandle[]): FootprintCandle[] {
+  const byTime = new Map<number, FootprintCandle>();
+  for (const footprint of viewport) byTime.set(footprint.time, footprint);
+  for (const footprint of live) {
+    const historical = byTime.get(footprint.time);
+    const hasAuthoritativeLiveRows = footprint.rows.length > 0 && footprint.quality !== "aggregate-only";
+    if (!historical || hasAuthoritativeLiveRows) byTime.set(footprint.time, footprint);
+  }
+  return [...byTime.values()].sort((left, right) => left.time - right.time);
+}
+
 export function useViewportFootprints(state: MarketState, visible: Candle[], enabled: boolean): ViewportFootprintState {
   const [footprints, setFootprints] = useState<FootprintCandle[]>([]);
   const [status, setStatus] = useState<ViewportFootprintState["status"]>("idle");
