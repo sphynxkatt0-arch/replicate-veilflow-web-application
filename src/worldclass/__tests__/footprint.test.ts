@@ -37,6 +37,43 @@ describe("FootprintAccumulator", () => {
     expect(fp.quality).toBe("full");
   });
 
+  it("confirms unfinished auctions only from native FULL high/low rows", () => {
+    const auctionCandle: Candle = { ...candle, high: 100.2, low: 100.0, volume: 10 };
+    const rows = [
+      trade("1", 1_000, 100.2, 2, "sell", 1),
+      trade("2", 2_000, 100.2, 3, "buy", 2),
+      trade("3", 3_000, 100.0, 5, "sell", 3),
+    ];
+    const result = buildFootprints(MARKETS.BTC, "1m", [auctionCandle], rows, {
+      source: "binance-aggtrades", startTime: 0, endTime: 60_000, contiguous: true, eventCount: rows.length,
+    }, 70_000);
+    const fp = result.footprints[0];
+    expect(fp.quality).toBe("full");
+    expect(fp.unfinishedHigh).toBe(true);
+    expect(fp.unfinishedHighPrice).toBe(100.2);
+    expect(fp.unfinishedLow).toBe(false);
+    expect(fp.unfinishedLowPrice).toBeUndefined();
+
+    const regrouped = regroupFootprint(fp, auctionCandle, 1, 3, 0);
+    expect(regrouped.unfinishedHigh).toBe(true);
+    expect(regrouped.unfinishedHighPrice).toBe(100.2);
+    expect(regrouped.unfinishedLow).toBe(false);
+  });
+
+  it("does not claim unfinished auctions on partial coverage", () => {
+    const auctionCandle: Candle = { ...candle, high: 100.2, low: 100.0, volume: 5 };
+    const rows = [
+      trade("1", 30_000, 100.2, 2, "sell", 1),
+      trade("2", 31_000, 100.2, 3, "buy", 2),
+    ];
+    const result = buildFootprints(MARKETS.BTC, "1m", [auctionCandle], rows, {
+      source: "binance-aggtrades", startTime: 30_000, endTime: 59_999, contiguous: true, eventCount: rows.length,
+    }, 70_000);
+    expect(result.footprints[0].quality).toBe("live-partial");
+    expect(result.footprints[0].unfinishedHigh).toBeUndefined();
+    expect(result.footprints[0].unfinishedLow).toBeUndefined();
+  });
+
   it("marks the first partially observed candle as live-partial", () => {
     const rows = [trade("1", 30_000, 100, 2, "buy", 10)];
     const result = buildFootprints(MARKETS.BTC, "1m", [candle], rows, {
@@ -52,6 +89,7 @@ describe("FootprintAccumulator", () => {
     });
     accumulator.markGap(10_000);
     expect(accumulator.snapshot(70_000).footprints[0].quality).toBe("gapped");
+    expect(accumulator.snapshot(70_000).footprints[0].unfinishedHigh).toBeUndefined();
   });
 
   it("calculates POC, value area, row delta, and diagonal imbalance", () => {
