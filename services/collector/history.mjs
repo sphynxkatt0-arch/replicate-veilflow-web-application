@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { collectBinanceArchiveTrades } from "./binanceArchive.mjs";
 import { FileEventLog, normalizedEvent, sha256 } from "./core.mjs";
 
 const HOUR_MS = 60 * 60_000;
@@ -135,6 +136,58 @@ export async function collectBinanceAggTrades({
   return { rows, requestCount, ...inspectAggTradeContinuity(rows) };
 }
 
+export async function collectBinanceHistoricalTrades({
+  symbol,
+  productType = "spot",
+  startTime,
+  endTime,
+  fetchImpl = globalThis.fetch,
+  now = Date.now(),
+  onProgress,
+} = {}) {
+  const start = asFiniteNumber(startTime, "startTime");
+  const end = asFiniteNumber(endTime, "endTime");
+  const archive = await collectBinanceArchiveTrades({
+    symbol,
+    productType,
+    startTime: start,
+    endTime: end,
+    fetchImpl,
+    now,
+    onProgress: (progress) => onProgress?.({ source: "archive", ...progress }),
+  });
+  const byId = new Map(archive.rows.map((row) => [row.a, row]));
+  let requestCount = 0;
+  const restRanges = [];
+
+  for (const range of archive.missingRanges) {
+    const rest = await collectBinanceAggTrades({
+      symbol,
+      productType,
+      startTime: range.startTime,
+      endTime: range.endTime,
+      fetchImpl,
+      onProgress: (progress) => onProgress?.({ source: "rest", ...progress }),
+    });
+    requestCount += rest.requestCount;
+    for (const row of rest.rows) byId.set(row.a, row);
+    restRanges.push({ ...range, requestCount: rest.requestCount, eventCount: rest.rows.length });
+  }
+
+  const rows = [...byId.values()]
+    .filter((row) => row.T >= start && row.T <= end)
+    .sort((left, right) => left.a - right.a);
+  return {
+    rows,
+    requestCount,
+    archiveCount: archive.archives.length,
+    archives: archive.archives,
+    archiveRanges: archive.coveredRanges,
+    restRanges,
+    ...inspectAggTradeContinuity(rows),
+  };
+}
+
 export function mapBinanceAggTradeEvent(raw, context) {
   const price = Number(raw.p);
   const size = Number(raw.q);
@@ -159,7 +212,7 @@ export function mapBinanceAggTradeEvent(raw, context) {
       firstTradeId: raw.f,
       lastTradeId: raw.l,
       buyerWasMaker: raw.m,
-      source: "binance-aggtrades-history",
+      source: context.source ?? "binance-aggtrades-history",
     },
   });
 }
@@ -195,6 +248,7 @@ export async function backfillBinanceHistory({
   startTime,
   endTime,
   fetchImpl = globalThis.fetch,
+  now = Date.now(),
   onProgress,
 } = {}) {
   const start = asFiniteNumber(startTime, "startTime");
@@ -206,16 +260,18 @@ export async function backfillBinanceHistory({
     productType: normalizedProduct,
   };
 
-  const result = await collectBinanceAggTrades({
+  const result = await collectBinanceHistoricalTrades({
     symbol: context.venueSymbol,
     productType: normalizedProduct,
     startTime: start,
     endTime: end,
     fetchImpl,
+    now,
     onProgress,
   });
   if (!result.rows.length) throw new Error("No Binance aggregate trades were returned for the requested range");
 
+  const source = result.archiveCount > 0 ? (result.restRanges.length ? "binance-public-archive+rest" : "binance-public-archive") : "binance-aggtrades-rest";
   const log = new FileEventLog(dataDir);
   const id = sessionId || `binance-${context.venueSymbol}-${Math.floor(start)}-${Math.floor(end)}`.toLowerCase();
   await log.createSession({
@@ -224,11 +280,14 @@ export async function backfillBinanceHistory({
     venueSymbol: context.venueSymbol,
     symbol: context.symbol,
     productType: normalizedProduct,
-    source: "binance-aggtrades-history",
+    source,
     requestedStartTime: start,
     requestedEndTime: end,
     contiguous: result.contiguous,
     sequenceGapCount: result.gaps.length,
+    archiveCount: result.archiveCount,
+    restRequestCount: result.requestCount,
+    archives: result.archives,
   });
 
   const gapsByReceivedId = new Map(result.gaps.map((gap) => [gap.received, gap]));
@@ -236,18 +295,20 @@ export async function backfillBinanceHistory({
   for (const row of result.rows) {
     const gap = gapsByReceivedId.get(row.a);
     if (gap) events.push(qualityEvent(context, gap));
-    events.push(mapBinanceAggTradeEvent(row, context));
+    events.push(mapBinanceAggTradeEvent(row, { ...context, source }));
   }
   await log.append(id, events);
 
   const analyticsHash = sha256({
-    source: "binance-aggtrades-history",
+    source,
     firstId: result.firstId,
     lastId: result.lastId,
     firstTime: result.firstTime,
     lastTime: result.lastTime,
     eventCount: result.rows.length,
     gaps: result.gaps,
+    archives: result.archives.map((archive) => ({ date: archive.date, checksum: archive.checksum, eventCount: archive.eventCount })),
+    restRanges: result.restRanges,
   });
   const manifest = await log.finalize(id, analyticsHash);
   return {
@@ -256,6 +317,9 @@ export async function backfillBinanceHistory({
     requestedEndTime: end,
     tradeCount: result.rows.length,
     requestCount: result.requestCount,
+    archiveCount: result.archiveCount,
+    archives: result.archives,
+    restRanges: result.restRanges,
     contiguous: result.contiguous,
     gaps: result.gaps,
     firstId: result.firstId,
@@ -285,16 +349,23 @@ async function main() {
     productType,
     startTime,
     endTime,
-    onProgress: ({ requestCount, eventCount, windowStart, windowEnd }) => {
-      if (requestCount === 1 || requestCount % 25 === 0) {
-        console.log(`[backfill] requests=${requestCount} trades=${eventCount} window=${new Date(windowStart).toISOString()}..${new Date(windowEnd).toISOString()}`);
+    now,
+    onProgress: (progress) => {
+      if (progress.source === "archive") {
+        if (progress.state === "loaded") console.log(`[backfill] archive ${new Date(progress.day).toISOString().slice(0, 10)} loaded · trades=${progress.rowCount}`);
+        else if (progress.state === "missing") console.log(`[backfill] archive ${new Date(progress.day).toISOString().slice(0, 10)} unavailable; REST bridge required`);
+        return;
+      }
+      if (progress.requestCount === 1 || progress.requestCount % 25 === 0) {
+        console.log(`[backfill] REST requests=${progress.requestCount} trades=${progress.eventCount} window=${new Date(progress.windowStart).toISOString()}..${new Date(progress.windowEnd).toISOString()}`);
       }
     },
   });
   console.log(JSON.stringify({
     sessionId: result.sessionId,
     tradeCount: result.tradeCount,
-    requestCount: result.requestCount,
+    archiveCount: result.archiveCount,
+    restRequestCount: result.requestCount,
     contiguous: result.contiguous,
     gapCount: result.gaps.length,
     firstTime: result.firstTime,
