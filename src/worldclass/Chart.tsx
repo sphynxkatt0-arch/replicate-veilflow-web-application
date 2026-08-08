@@ -3,6 +3,7 @@ import { detectLargeTrades } from "./analytics";
 import { regroupFootprint } from "./footprint";
 import { clamp, formatCompact, formatNotional, formatPrice, formatTime } from "./format";
 import { groupBook } from "./orderBook";
+import { resolveFootprintSemanticZoom, semanticDisplayStep } from "./semanticZoom";
 import type { Candle, ChartMode, FootprintCandle, FootprintQuality, MarketState } from "./types";
 
 interface ChartSettings {
@@ -46,7 +47,7 @@ interface RenderMeta {
 const QUALITY_LABEL: Record<FootprintQuality, string> = {
   full: "FULL",
   "live-partial": "PARTIAL",
-  "aggregate-only": "AGG",
+  "aggregate-only": "NO EXEC HISTORY",
   gapped: "GAP",
   "replay-full": "REPLAY",
 };
@@ -145,6 +146,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
   const footprintByTime = useMemo(() => new Map(state.footprints.map((item) => [item.time, item])), [state.footprints]);
   const large = useMemo(() => detectLargeTrades(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000), [state.trades, state.market.key]);
   const groupedBook = useMemo(() => groupBook(state.book, Math.max(state.market.tickSize, (state.book?.asks[0]?.price ?? 1) * 0.00005), 22), [state.book, state.market.tickSize]);
+  const semanticPreview = useMemo(() => resolveFootprintSemanticZoom((size.width - 78) / Math.max(1, visible.length)), [size.width, visible.length]);
 
   const drawOverlay = useCallback(() => {
     const canvas = overlayRef.current;
@@ -171,8 +173,8 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
     const tooltipHeight = mode === "footprint" ? 50 : 34;
     ctx.fillStyle = "rgba(8,14,22,.96)";
     ctx.strokeStyle = "#263a4d";
-    ctx.fillRect(10, 10, 360, tooltipHeight);
-    ctx.strokeRect(10, 10, 360, tooltipHeight);
+    ctx.fillRect(10, 10, 390, tooltipHeight);
+    ctx.strokeRect(10, 10, 390, tooltipHeight);
     ctx.font = "9px JetBrains Mono, monospace";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
@@ -241,8 +243,8 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
 
     const requestedStep = state.market.tickSize * Math.max(1, settings.footprintTicksPerRow || state.market.footprintDefaultTicks);
     const pixelsPerRequestedStep = requestedStep / priceRange * plotHeight;
-    const autoMultiplier = mode === "footprint" ? Math.max(1, Math.ceil(7 / Math.max(0.001, pixelsPerRequestedStep))) : 1;
-    const displayStep = Number((requestedStep * autoMultiplier).toPrecision(12));
+    const semantic = resolveFootprintSemanticZoom(xStep);
+    const displayStep = mode === "footprint" ? semanticDisplayStep(requestedStep, pixelsPerRequestedStep, semantic) : requestedStep;
     const displayFootprints = new Map<number, FootprintCandle>();
 
     if (settings.showGrid) {
@@ -287,7 +289,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       const highY = yFor(candle.high); const lowY = yFor(candle.low);
       const openY = yFor(candle.open); const closeY = yFor(candle.close);
       const bodyWidth = Math.max(1.5, xStep * (faint ? 0.18 : 0.58));
-      ctx.globalAlpha = faint ? 0.38 : 1;
+      ctx.globalAlpha = faint ? 0.3 : 1;
       ctx.strokeStyle = color; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(x, highY); ctx.lineTo(x, lowY); ctx.stroke();
       ctx.fillStyle = up ? "#17b98f" : "#d74668";
@@ -306,108 +308,134 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
         ctx.fillRect(xFor(index) - Math.max(1, xStep * 0.35), delta >= 0 ? mid - barHeight : mid, Math.max(2, xStep * 0.7), barHeight);
       });
     } else if (mode === "footprint") {
-      visible.forEach((candle, index) => drawCandle(candle, index, true));
-      visible.forEach((candle, index) => {
-        const raw = footprintByTime.get(candle.time);
-        const footprint = raw ? regroupFootprint(raw, candle, displayStep, settings.footprintImbalanceRatio, settings.footprintMinVolume) : undefined;
-        if (footprint) displayFootprints.set(candle.time, footprint);
-        const x = xFor(index);
-        const cellWidth = Math.max(20, xStep * 0.88);
-        const half = cellWidth / 2;
-        const quality = footprint?.quality ?? "aggregate-only";
-        const qColor = qualityColor(quality);
-
-        ctx.fillStyle = qColor;
-        ctx.globalAlpha = 0.75;
-        ctx.fillRect(x - cellWidth / 2, 2, cellWidth, 2);
-        ctx.globalAlpha = 1;
-
-        if (!footprint?.rows.length) {
-          if (xStep >= 32) {
-            ctx.font = "700 7px JetBrains Mono, monospace";
-            ctx.textAlign = "center";
-            ctx.fillStyle = qColor;
-            ctx.fillText(QUALITY_LABEL[quality], x, Math.min(plotHeight - 10, yFor(candle.high) - 7));
-            if (candle.buyVolume !== undefined && candle.sellVolume !== undefined && xStep >= 52) {
-              ctx.fillStyle = "#7f8fa4";
-              ctx.fillText(`${volumeText(candle.sellVolume)} × ${volumeText(candle.buyVolume)}`, x, Math.max(12, yFor(candle.low) + 10));
-            }
-          }
-          return;
-        }
-
-        const maxLevel = Math.max(1, ...footprint.rows.map((row) => row.totalVolume));
-        const rowPixelHeight = clamp(displayStep / priceRange * plotHeight * 0.88, 6, 14);
-        for (const row of footprint.rows) {
-          const y = yFor(row.price);
-          if (y < 0 || y > plotHeight) continue;
-          const bidAlpha = clamp(row.bidVolume / maxLevel, 0.05, 0.62);
-          const askAlpha = clamp(row.askVolume / maxLevel, 0.05, 0.62);
-
-          if (row.inValueArea) {
-            ctx.fillStyle = "rgba(126,147,174,.055)";
-            ctx.fillRect(x - half, y - rowPixelHeight / 2, cellWidth, rowPixelHeight);
-          }
-          ctx.fillStyle = `rgba(255,91,127,${bidAlpha})`;
-          ctx.fillRect(x - half, y - rowPixelHeight / 2, half, rowPixelHeight);
-          ctx.fillStyle = `rgba(40,223,180,${askAlpha})`;
-          ctx.fillRect(x, y - rowPixelHeight / 2, half, rowPixelHeight);
-
-          if (row.price === footprint.pocPrice) {
-            ctx.strokeStyle = "rgba(244,189,74,.95)";
-            ctx.lineWidth = 1;
-            ctx.strokeRect(x - half, y - rowPixelHeight / 2, cellWidth, rowPixelHeight);
-          }
-          if (row.bidImbalance) {
-            ctx.strokeStyle = "#ff7895";
-            ctx.lineWidth = row.stackedBid ? 2 : 1;
-            ctx.strokeRect(x - half, y - rowPixelHeight / 2, half, rowPixelHeight);
-          }
-          if (row.askImbalance) {
-            ctx.strokeStyle = "#54f1c9";
-            ctx.lineWidth = row.stackedAsk ? 2 : 1;
-            ctx.strokeRect(x, y - rowPixelHeight / 2, half, rowPixelHeight);
-          }
-          if (row.stackedBid) {
-            ctx.fillStyle = "#ff7895";
-            ctx.fillRect(x - half - 3, y - 1.5, 2, 3);
-          }
-          if (row.stackedAsk) {
-            ctx.fillStyle = "#54f1c9";
-            ctx.fillRect(x + half + 1, y - 1.5, 2, 3);
-          }
-
-          if (xStep >= 50 && rowPixelHeight >= 7) {
-            ctx.font = `${rowPixelHeight >= 10 ? 8 : 7}px JetBrains Mono, monospace`;
-            ctx.textBaseline = "middle";
-            ctx.fillStyle = "#ffd3dc"; ctx.textAlign = "right"; ctx.fillText(volumeText(row.bidVolume), x - 2, y);
-            ctx.fillStyle = "#b8ffe9"; ctx.textAlign = "left"; ctx.fillText(volumeText(row.askVolume), x + 2, y);
-          }
-        }
-
-        if (xStep >= 40) {
-          const labelY = clamp(yFor(candle.high) - 9, 12, plotHeight - 12);
-          ctx.font = "700 7px JetBrains Mono, monospace";
-          ctx.textAlign = "center";
-          ctx.fillStyle = qColor;
-          ctx.fillText(QUALITY_LABEL[quality], x, labelY);
-          if (settings.showFootprintDelta) {
-            const deltaY = clamp(yFor(candle.low) + 10, 12, plotHeight - 4);
-            ctx.fillStyle = footprint.delta >= 0 ? "#70f2d0" : "#ff8aa1";
-            ctx.fillText(`Δ ${volumeText(footprint.delta)}`, x, deltaY);
-          }
-        }
-      });
-
-      if (xStep < 26) {
-        ctx.fillStyle = "rgba(8,14,22,.94)";
+      if (semantic.level === "macro") {
+        visible.forEach((candle, index) => {
+          drawCandle(candle, index);
+          const raw = footprintByTime.get(candle.time);
+          if (raw) displayFootprints.set(candle.time, raw);
+        });
+        ctx.fillStyle = "rgba(8,14,22,.92)";
         ctx.strokeStyle = "#2b3c50";
-        ctx.fillRect(12, 12, 240, 28);
-        ctx.strokeRect(12, 12, 240, 28);
+        ctx.fillRect(12, 12, 286, 30);
+        ctx.strokeRect(12, 12, 286, 30);
         ctx.fillStyle = "#91a4ba";
         ctx.font = "9px JetBrains Mono, monospace";
         ctx.textAlign = "left";
-        ctx.fillText("Zoom in to reveal footprint rows", 22, 30);
+        ctx.textBaseline = "middle";
+        ctx.fillText("MACRO · OHLC + volume · zoom in for order flow", 22, 27);
+      } else {
+        visible.forEach((candle, index) => drawCandle(candle, index, true));
+        visible.forEach((candle, index) => {
+          const raw = footprintByTime.get(candle.time);
+          const footprint = raw ? regroupFootprint(raw, candle, displayStep, settings.footprintImbalanceRatio, settings.footprintMinVolume) : undefined;
+          if (footprint) displayFootprints.set(candle.time, footprint);
+          const x = xFor(index);
+          const cellWidth = semantic.level === "full" ? clamp(xStep * 0.9, 68, 150) : Math.max(24, xStep * 0.82);
+          const half = cellWidth / 2;
+          const quality = footprint?.quality ?? "aggregate-only";
+          const qColor = qualityColor(quality);
+
+          ctx.fillStyle = qColor;
+          ctx.globalAlpha = 0.8;
+          ctx.fillRect(x - cellWidth / 2, 2, cellWidth, 2);
+          ctx.globalAlpha = 1;
+
+          if (!footprint?.rows.length) {
+            ctx.font = semantic.level === "full" ? "700 9px JetBrains Mono, monospace" : "700 7px JetBrains Mono, monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = qColor;
+            ctx.fillText(QUALITY_LABEL[quality], x, clamp(yFor(candle.high) - 8, 12, plotHeight - 12));
+            return;
+          }
+
+          const maxLevel = Math.max(1, ...footprint.rows.map((row) => row.totalVolume));
+          const rawRowHeight = displayStep / priceRange * plotHeight * 0.9;
+          const rowPixelHeight = clamp(rawRowHeight, semantic.minRowPx, semantic.maxRowPx);
+          if (semantic.level === "full") {
+            const headerY = clamp(yFor(candle.high) - 13, 12, plotHeight - 12);
+            ctx.font = "800 8px JetBrains Mono, monospace";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = "#ff9cb0";
+            ctx.textAlign = "right";
+            ctx.fillText("BID", x - 5, headerY);
+            ctx.fillStyle = "#8ff8dc";
+            ctx.textAlign = "left";
+            ctx.fillText("ASK", x + 5, headerY);
+          }
+
+          for (const row of footprint.rows) {
+            const y = yFor(row.price);
+            if (y < 0 || y > plotHeight) continue;
+            const bidAlpha = clamp(row.bidVolume / maxLevel, 0.05, semantic.level === "full" ? 0.66 : 0.42);
+            const askAlpha = clamp(row.askVolume / maxLevel, 0.05, semantic.level === "full" ? 0.66 : 0.42);
+
+            if (row.inValueArea) {
+              ctx.fillStyle = semantic.level === "full" ? "rgba(126,147,174,.075)" : "rgba(126,147,174,.05)";
+              ctx.fillRect(x - half, y - rowPixelHeight / 2, cellWidth, rowPixelHeight);
+            }
+            ctx.fillStyle = `rgba(255,91,127,${bidAlpha})`;
+            ctx.fillRect(x - half, y - rowPixelHeight / 2, half, rowPixelHeight);
+            ctx.fillStyle = `rgba(40,223,180,${askAlpha})`;
+            ctx.fillRect(x, y - rowPixelHeight / 2, half, rowPixelHeight);
+
+            if (semantic.level === "full") {
+              ctx.strokeStyle = "rgba(111,132,155,.22)";
+              ctx.lineWidth = 1;
+              ctx.strokeRect(x - half, y - rowPixelHeight / 2, cellWidth, rowPixelHeight);
+              ctx.strokeStyle = "rgba(168,188,207,.26)";
+              ctx.beginPath(); ctx.moveTo(x, y - rowPixelHeight / 2); ctx.lineTo(x, y + rowPixelHeight / 2); ctx.stroke();
+            }
+
+            if (semantic.showPoc && row.price === footprint.pocPrice) {
+              ctx.strokeStyle = "rgba(244,189,74,.98)";
+              ctx.lineWidth = semantic.level === "full" ? 1.6 : 1.2;
+              ctx.strokeRect(x - half, y - rowPixelHeight / 2, cellWidth, rowPixelHeight);
+            }
+            if (semantic.showImbalance && row.bidImbalance) {
+              ctx.strokeStyle = "#ff7895";
+              ctx.lineWidth = row.stackedBid ? 2 : 1;
+              ctx.strokeRect(x - half, y - rowPixelHeight / 2, half, rowPixelHeight);
+            }
+            if (semantic.showImbalance && row.askImbalance) {
+              ctx.strokeStyle = "#54f1c9";
+              ctx.lineWidth = row.stackedAsk ? 2 : 1;
+              ctx.strokeRect(x, y - rowPixelHeight / 2, half, rowPixelHeight);
+            }
+            if (row.stackedBid) {
+              ctx.fillStyle = "#ff7895";
+              ctx.fillRect(x - half - 3, y - Math.max(2, rowPixelHeight * 0.18), 2, Math.max(4, rowPixelHeight * 0.36));
+            }
+            if (row.stackedAsk) {
+              ctx.fillStyle = "#54f1c9";
+              ctx.fillRect(x + half + 1, y - Math.max(2, rowPixelHeight * 0.18), 2, Math.max(4, rowPixelHeight * 0.36));
+            }
+
+            if (semantic.showNumbers) {
+              const fontSize = rowPixelHeight >= 15 ? 10 : 9;
+              ctx.font = `700 ${fontSize}px JetBrains Mono, monospace`;
+              ctx.textBaseline = "middle";
+              ctx.fillStyle = "#ffe0e7";
+              ctx.textAlign = "right";
+              ctx.fillText(volumeText(row.bidVolume), x - 4, y);
+              ctx.fillStyle = "#d0fff2";
+              ctx.textAlign = "left";
+              ctx.fillText(volumeText(row.askVolume), x + 4, y);
+            }
+          }
+
+          const labelY = clamp(yFor(candle.high) - (semantic.level === "full" ? 24 : 9), 12, plotHeight - 12);
+          ctx.font = semantic.level === "full" ? "800 8px JetBrains Mono, monospace" : "700 7px JetBrains Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillStyle = qColor;
+          ctx.fillText(QUALITY_LABEL[quality], x, labelY);
+          if (settings.showFootprintDelta && semantic.showDelta) {
+            const deltaY = clamp(yFor(candle.low) + (semantic.level === "full" ? 13 : 10), 12, plotHeight - 5);
+            ctx.fillStyle = footprint.delta >= 0 ? "#70f2d0" : "#ff8aa1";
+            ctx.fillText(`Δ ${volumeText(footprint.delta)}`, x, deltaY);
+          }
+        });
       }
     } else {
       visible.forEach((candle, index) => drawCandle(candle, index));
@@ -563,7 +591,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       <div className="vf-chart-hud">
         <span>{visible.length} bars</span>
         <span>Zoom {bars}</span>
-        {mode === "footprint" && <span>Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()}</span>}
+        {mode === "footprint" && <span>Semantic {semanticPreview.label} · Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()}</span>}
         <span>Big orders ≥ {formatNotional(large.threshold)}</span>
       </div>
     </div>
