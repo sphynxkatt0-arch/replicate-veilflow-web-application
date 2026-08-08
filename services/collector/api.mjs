@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { FileEventLog, sha256 } from "./core.mjs";
 import { JsonDocumentStore, TelemetryStore, evaluateAlert, validateWorkspaceDocument } from "./control.mjs";
 import { buildFootprints, footprintCoverage } from "./footprints.mjs";
+import { FootprintStore, footprintCacheKey } from "./footprintStore.mjs";
 
 export { buildFootprints } from "./footprints.mjs";
 
@@ -55,6 +56,7 @@ export function eventsToCsv(events) {
 export function createApiServer({ dataDir, port = Number(process.env.PORT || 8787), host = process.env.HOST || "127.0.0.1" } = {}) {
   const root = dataDir || process.env.VEILFLOW_DATA_DIR || join(process.cwd(), ".veilflow-data");
   const log = new FileEventLog(root);
+  const footprintStore = new FootprintStore(root);
   const workspaces = new JsonDocumentStore(root, "workspaces");
   const alerts = new JsonDocumentStore(root, "alerts");
   const telemetry = new TelemetryStore(root);
@@ -87,7 +89,6 @@ export function createApiServer({ dataDir, port = Number(process.env.PORT || 878
           return;
         }
         if (request.method === "GET" && parts[2] === "footprints") {
-          const events = await log.readEvents(sessionId);
           const timeframe = url.searchParams.get("timeframe") || "1m";
           const tickSize = Number(url.searchParams.get("tickSize") || "0.01");
           const options = {
@@ -97,9 +98,21 @@ export function createApiServer({ dataDir, port = Number(process.env.PORT || 878
             minVolume: optionalNumber(url.searchParams.get("minVolume")),
             valueAreaRatio: optionalNumber(url.searchParams.get("valueAreaRatio")),
           };
+          const manifest = await log.readManifest(sessionId);
+          const cacheable = manifest.status === "complete" && typeof manifest.eventHash === "string";
+          const key = cacheable ? footprintCacheKey({ sessionId, eventHash: manifest.eventHash, timeframe, tickSize, options }) : undefined;
+          if (key) {
+            const cached = await footprintStore.get(sessionId, key);
+            if (cached) {
+              json(response, 200, { ...cached.payload, cache: { state: "HIT", key, createdAt: cached.createdAt } });
+              return;
+            }
+          }
+
+          const events = await log.readEvents(sessionId);
           const footprints = buildFootprints(events, timeframe, tickSize, options);
           const coverage = footprintCoverage(events, footprints, options);
-          json(response, 200, {
+          const payload = {
             sessionId,
             timeframe,
             tickSize,
@@ -109,7 +122,13 @@ export function createApiServer({ dataDir, port = Number(process.env.PORT || 878
             coverage,
             outputHash: sha256(footprints),
             footprints,
-          });
+          };
+          if (key) {
+            const cached = await footprintStore.put(sessionId, key, { payload });
+            json(response, 200, { ...payload, cache: { state: "MISS", key, createdAt: cached.createdAt } });
+          } else {
+            json(response, 200, { ...payload, cache: { state: "BYPASS", reason: "session is still mutable" } });
+          }
           return;
         }
         if (request.method === "GET" && parts[2] === "verify") {
@@ -178,7 +197,7 @@ export function createApiServer({ dataDir, port = Number(process.env.PORT || 878
           if (request.method === "PUT") {
             const alert = await readJson(request);
             if (!alert.metric || !alert.operator || !Number.isFinite(Number(alert.threshold))) { json(response, 400, { error: "metric, operator, and numeric threshold are required" }); return; }
-            json(response, 200, await alerts.put(id, { ...alert, id })); return;
+            json(response, 200, await alerts.put(id, { ...alert, id }); return;
           }
           if (request.method === "DELETE") { await alerts.delete(id); json(response, 200, { deleted: id }); return; }
         }
