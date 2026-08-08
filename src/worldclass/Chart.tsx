@@ -5,6 +5,7 @@ import { groupBook } from "./orderBook";
 import { resolveFootprintSemanticZoom, semanticDisplayStep } from "./semanticZoom";
 import { buildUnfinishedAuctionLevels } from "./unfinishedAuction";
 import { useLargeTradeAnalysis } from "./useLargeTradeAnalysis";
+import { mergeRenderFootprints, useViewportFootprints } from "./useViewportFootprints";
 import type { Candle, ChartMode, FootprintCandle, FootprintQuality, MarketState } from "./types";
 
 interface ChartSettings {
@@ -144,11 +145,13 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
   const end = Math.max(0, state.candles.length - offset);
   const start = Math.max(0, end - bars);
   const visible = useMemo(() => state.candles.slice(start, end), [state.candles, start, end]);
-  const footprintByTime = useMemo(() => new Map(state.footprints.map((item) => [item.time, item])), [state.footprints]);
+  const viewportFootprints = useViewportFootprints(state, visible, mode === "footprint" && !replayActive);
+  const renderFootprints = useMemo(() => mergeRenderFootprints(state.footprints, viewportFootprints.footprints), [state.footprints, viewportFootprints.footprints]);
+  const footprintByTime = useMemo(() => new Map(renderFootprints.map((item) => [item.time, item])), [renderFootprints]);
   const large = useLargeTradeAnalysis(state.trades, state.market.key === "BTC" || state.market.key === "BTCPERP" ? 75_000 : 25_000);
   const groupedBook = useMemo(() => groupBook(state.book, Math.max(state.market.tickSize, (state.book?.asks[0]?.price ?? 1) * 0.00005), 22), [state.book, state.market.tickSize]);
   const semanticPreview = useMemo(() => resolveFootprintSemanticZoom((size.width - 78) / Math.max(1, visible.length)), [size.width, visible.length]);
-  const auctionLevels = useMemo(() => buildUnfinishedAuctionLevels(state.footprints, state.candles), [state.footprints, state.candles]);
+  const auctionLevels = useMemo(() => buildUnfinishedAuctionLevels(renderFootprints, state.candles), [renderFootprints, state.candles]);
   const openAuctionCount = useMemo(() => auctionLevels.filter((level) => !level.resolved).length, [auctionLevels]);
 
   const drawOverlay = useCallback(() => {
@@ -628,7 +631,7 @@ export function MarketChart({ state, mode, settings, replayActive, onFps }: Prop
       <div className="vf-chart-hud">
         <span>{visible.length} bars</span>
         <span>Zoom {bars}</span>
-        {mode === "footprint" && <span>Semantic {semanticPreview.label} · Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()} · UA open {openAuctionCount}</span>}
+        {mode === "footprint" && <span>Semantic {semanticPreview.label} · Rows {settings.footprintTicksPerRow} ticks+ · {state.footprintCoverage.quality.toUpperCase()} · Range {viewportFootprints.status.toUpperCase()} · UA open {openAuctionCount}</span>}
         <span>Big orders ≥ {formatNotional(large.threshold)}</span>
       </div>
     </div>
