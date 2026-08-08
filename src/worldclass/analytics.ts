@@ -71,13 +71,46 @@ export function depthAnalytics(book: OrderBook | null): Pick<AnalyticsSnapshot, 
   };
 }
 
-function quantile(sorted: number[], percentile: number): number {
-  if (!sorted.length) return 0;
-  const index = (sorted.length - 1) * percentile;
+function selectKth(input: number[], kth: number): number {
+  const values = input.slice();
+  let left = 0;
+  let right = values.length - 1;
+  const target = Math.max(0, Math.min(right, kth));
+
+  while (left < right) {
+    const pivot = values[Math.floor((left + right) / 2)];
+    let lower = left;
+    let cursor = left;
+    let upper = right;
+    while (cursor <= upper) {
+      if (values[cursor] < pivot) {
+        [values[lower], values[cursor]] = [values[cursor], values[lower]];
+        lower += 1;
+        cursor += 1;
+      } else if (values[cursor] > pivot) {
+        [values[cursor], values[upper]] = [values[upper], values[cursor]];
+        upper -= 1;
+      } else {
+        cursor += 1;
+      }
+    }
+    if (target < lower) right = lower - 1;
+    else if (target > upper) left = upper + 1;
+    else return values[target];
+  }
+  return values[left];
+}
+
+export function sampleQuantile(values: number[], percentile: number): number {
+  if (!values.length) return 0;
+  const bounded = Math.max(0, Math.min(1, percentile));
+  const index = (values.length - 1) * bounded;
   const lower = Math.floor(index);
   const upper = Math.ceil(index);
-  if (lower === upper) return sorted[lower];
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
+  const lowerValue = selectKth(values, lower);
+  if (lower === upper) return lowerValue;
+  const upperValue = selectKth(values, upper);
+  return lowerValue + (upperValue - lowerValue) * (index - lower);
 }
 
 export function detectLargeTrades(
@@ -88,8 +121,8 @@ export function detectLargeTrades(
 ): { threshold: number; events: LargeTrade[] } {
   const recent = trades.slice(-3000);
   if (!recent.length) return { threshold: absoluteFloor, events: [] };
-  const notionals = recent.map((trade) => trade.notional).sort((a, b) => a - b);
-  const adaptiveThreshold = recent.length >= 20 ? quantile(notionals, percentile) : 0;
+  const notionals = recent.map((trade) => trade.notional);
+  const adaptiveThreshold = recent.length >= 20 ? sampleQuantile(notionals, percentile) : 0;
   const threshold = Math.max(absoluteFloor, adaptiveThreshold);
   const mean = notionals.reduce((sum, value) => sum + value, 0) / notionals.length;
   const variance = notionals.reduce((sum, value) => sum + (value - mean) ** 2, 0) / Math.max(1, notionals.length - 1);
