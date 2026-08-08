@@ -73,6 +73,22 @@ export function mergeRenderFootprints(live: FootprintCandle[], viewport: Footpri
   return [...byTime.values()].sort((left, right) => left.time - right.time);
 }
 
+export function landedCollectorRange(state: MarketState): CollectorFootprintRange | undefined {
+  if (state.footprintCoverage.source !== "collector-api") return undefined;
+  const populated = state.footprints.filter((footprint) => footprint.rows.length > 0 && footprint.quality !== "aggregate-only");
+  if (populated.length) {
+    return {
+      startTime: populated[0].time,
+      endTime: populated.at(-1)!.endTime,
+    };
+  }
+  if (state.footprintCoverage.startTime === undefined || state.footprintCoverage.endTime === undefined) return undefined;
+  return {
+    startTime: state.footprintCoverage.startTime,
+    endTime: state.footprintCoverage.endTime,
+  };
+}
+
 export function useViewportFootprints(state: MarketState, visible: Candle[], enabled: boolean): ViewportFootprintState {
   const [footprints, setFootprints] = useState<FootprintCandle[]>([]);
   const [status, setStatus] = useState<ViewportFootprintState["status"]>("idle");
@@ -84,6 +100,7 @@ export function useViewportFootprints(state: MarketState, visible: Candle[], ena
   const generationRef = useRef(0);
 
   const requested = useMemo(() => viewportRequestRange(state.candles, visible), [state.candles, visible]);
+  const landed = useMemo(() => landedCollectorRange(state), [state.footprintCoverage.source, state.footprintCoverage.startTime, state.footprintCoverage.endTime, state.footprints]);
 
   useEffect(() => {
     generationRef.current += 1;
@@ -92,13 +109,24 @@ export function useViewportFootprints(state: MarketState, visible: Candle[], ena
     timerRef.current = null;
     setFootprints([]);
     unavailableKeyRef.current = null;
-    const initial = state.footprintCoverage.source === "collector-api" && state.footprintCoverage.startTime !== undefined && state.footprintCoverage.endTime !== undefined
-      ? [{ startTime: state.footprintCoverage.startTime, endTime: state.footprintCoverage.endTime }]
-      : [];
-    loadedRangesRef.current = initial;
-    setLoadedRanges(initial);
-    setStatus(initial.length ? "ready" : "idle");
+    loadedRangesRef.current = [];
+    setLoadedRanges([]);
+    setStatus("idle");
   }, [state.market.key, state.timeframe]);
+
+  useEffect(() => {
+    if (!landed) return;
+    const nextRanges = mergeRanges(loadedRangesRef.current, landed);
+    loadedRangesRef.current = nextRanges;
+    setLoadedRanges(nextRanges);
+    unavailableKeyRef.current = null;
+    if (requested && rangeCovered(nextRanges, requested)) {
+      abortRef.current?.abort();
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      setStatus("ready");
+    }
+  }, [landed?.startTime, landed?.endTime, requested?.startTime, requested?.endTime]);
 
   useEffect(() => {
     if (!enabled || !requested || !collectorConfigured()) return;
@@ -126,8 +154,8 @@ export function useViewportFootprints(state: MarketState, visible: Candle[], ena
         unavailableKeyRef.current = null;
         setFootprints((current) => mergeViewportFootprints(current, snapshot.footprints, requested));
         const available = {
-          startTime: snapshot.coverage.startTime ?? requested.startTime,
-          endTime: snapshot.coverage.endTime ?? requested.endTime,
+          startTime: snapshot.footprints[0]?.time ?? snapshot.coverage.startTime ?? requested.startTime,
+          endTime: snapshot.footprints.at(-1)?.endTime ?? snapshot.coverage.endTime ?? requested.endTime,
         };
         const nextRanges = mergeRanges(loadedRangesRef.current, available);
         loadedRangesRef.current = nextRanges;
