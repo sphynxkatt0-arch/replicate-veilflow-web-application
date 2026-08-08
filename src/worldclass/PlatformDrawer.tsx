@@ -16,6 +16,19 @@ function formatTime(value?: number | string): string {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
 
+function formatDuration(milliseconds?: number): string {
+  if (milliseconds === undefined || !Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 function BuildCard() {
   const [metadata, setMetadata] = useState<BuildMetadata>({});
   useEffect(() => {
@@ -54,6 +67,47 @@ function ProvenanceCard({ engine }: { engine: EngineApi }) {
       <div><dt>Completeness</dt><dd>{state.footprintCoverage.contiguous ? "contiguous" : "gapped"}</dd></div>
     </dl>
     <p className="vf-platform-detail">{state.market.disclosure}</p>
+  </section>;
+}
+
+function CoverageCard({ engine }: { engine: EngineApi }) {
+  const state = engine.state;
+  const coverage = state.footprintCoverage;
+  const counts = useMemo(() => {
+    const result = { full: 0, live: 0, gap: 0, aggregate: 0 };
+    for (const footprint of state.footprints) {
+      if (footprint.quality === "full" || footprint.quality === "replay-full") result.full += 1;
+      else if (footprint.quality === "live-partial") result.live += 1;
+      else if (footprint.quality === "gapped") result.gap += 1;
+      else result.aggregate += 1;
+    }
+    return result;
+  }, [state.footprints]);
+  const duration = coverage.startTime !== undefined && coverage.endTime !== undefined
+    ? Math.max(0, coverage.endTime - coverage.startTime)
+    : undefined;
+  const gapCount = coverage.contiguous ? "0" : coverage.gappedAt !== undefined ? "≥1" : "unknown";
+  const quality = canonicalQuality(coverage.quality, engine.replay.mode === "events");
+
+  return <section className="vf-platform-card" aria-labelledby="vf-coverage-title">
+    <header><div><small>DATA INTEGRITY</small><h3 id="vf-coverage-title">Coverage inspector</h3></div><span className={`vf-platform-state vf-platform-${quality.toLowerCase().replaceAll(" ", "-")}`}>{quality}</span></header>
+    <dl className="vf-platform-grid">
+      <div><dt>Instrument</dt><dd>{state.market.providerSymbol} · {state.market.productType}</dd></div>
+      <div><dt>Provider</dt><dd>{state.market.provider}</dd></div>
+      <div><dt>Candles</dt><dd>{state.candles.length.toLocaleString()}</dd></div>
+      <div><dt>Execution coverage</dt><dd>{formatDuration(duration)}</dd></div>
+      <div><dt>Executions</dt><dd>{coverage.eventCount.toLocaleString()}</dd></div>
+      <div><dt>Sequence gaps</dt><dd className={coverage.contiguous ? "vf-positive" : "vf-negative"}>{gapCount}</dd></div>
+      <div><dt>First execution</dt><dd>{formatTime(coverage.startTime)}</dd></div>
+      <div><dt>Last execution</dt><dd>{formatTime(coverage.endTime)}</dd></div>
+      <div><dt>Footprints</dt><dd>{state.footprints.length.toLocaleString()}</dd></div>
+      <div><dt>FULL / LIVE / GAP</dt><dd>{counts.full} / {counts.live} / {counts.gap}</dd></div>
+      <div><dt>No execution history</dt><dd>{counts.aggregate.toLocaleString()}</dd></div>
+      <div><dt>Book</dt><dd>{state.book?.quality?.toUpperCase() ?? "UNAVAILABLE"}</dd></div>
+      <div><dt>Event latency</dt><dd>{state.eventLagMs.toLocaleString()} ms</dd></div>
+      <div><dt>Source</dt><dd>{coverage.source}</dd></div>
+    </dl>
+    <p className="vf-platform-detail">{coverage.detail}</p>
   </section>;
 }
 
@@ -154,6 +208,7 @@ export function PlatformDrawer({ engine, onClose }: { engine: EngineApi; onClose
     <aside className="vf-platform-drawer" role="dialog" aria-modal="true" aria-labelledby="vf-platform-title">
       <header><div><small>VEILFLOW PLATFORM CONTROL</small><h2 id="vf-platform-title">Trust, replay, and methodology</h2></div><button type="button" onClick={onClose} aria-label="Close platform inspector">×</button></header>
       <BuildCard />
+      <CoverageCard engine={engine} />
       <ProvenanceCard engine={engine} />
       <ReconciliationCard engine={engine} />
       <SessionsCard engine={engine} />
