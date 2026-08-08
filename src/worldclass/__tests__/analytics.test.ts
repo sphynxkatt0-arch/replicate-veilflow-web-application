@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { depthAnalytics, detectLargeTrades, rollingDelta, sessionCvd, sessionVwap } from "../analytics";
+import { depthAnalytics, detectLargeTrades, rollingDelta, sampleQuantile, sessionCvd, sessionVwap } from "../analytics";
 import type { Candle, OrderBook, Trade } from "../types";
 
 const day = Date.UTC(2026, 7, 6);
@@ -40,6 +40,13 @@ describe("depth analytics", () => {
 });
 
 describe("large trade detection", () => {
+  it("matches sorted quantile interpolation without sorting the sample", () => {
+    expect(sampleQuantile([5, 1, 3, 4, 2], 0.5)).toBe(3);
+    expect(sampleQuantile(Array.from({ length: 20 }, (_, index) => index + 1).reverse(), 0.5)).toBe(10.5);
+    expect(sampleQuantile([100, 10, 50, 25], 0)).toBe(10);
+    expect(sampleQuantile([100, 10, 50, 25], 1)).toBe(100);
+  });
+
   it("allows zero events when nothing exceeds the absolute floor", () => {
     const trades: Trade[] = Array.from({ length: 40 }, (_, index) => ({
       id: String(index),
