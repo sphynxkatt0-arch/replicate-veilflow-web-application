@@ -197,7 +197,7 @@ export function createApiServer({ dataDir, port = Number(process.env.PORT || 878
           if (request.method === "PUT") {
             const alert = await readJson(request);
             if (!alert.metric || !alert.operator || !Number.isFinite(Number(alert.threshold))) { json(response, 400, { error: "metric, operator, and numeric threshold are required" }); return; }
-            json(response, 200, await alerts.put(id, { ...alert, id }); return;
+            json(response, 200, await alerts.put(id, { ...alert, id })); return;
           }
           if (request.method === "DELETE") { await alerts.delete(id); json(response, 200, { deleted: id }); return; }
         }
