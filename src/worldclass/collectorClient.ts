@@ -32,6 +32,8 @@ interface CollectorFootprintResponse {
     requestedEndTime?: number;
     availableStartTime?: number;
     availableEndTime?: number;
+    firstSequence?: string | number;
+    lastSequence?: string | number;
     eventCount?: number;
     footprintCount?: number;
     contiguous?: boolean;
@@ -60,6 +62,11 @@ function collectorBaseUrl(): string | undefined {
 function finite(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function optionalFinite(value: unknown): number | undefined {
+  const parsed = finite(value, Number.NaN);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function quality(value: unknown): FootprintQuality {
@@ -201,6 +208,8 @@ export async function loadCollectorFootprints(
         source: "collector-api",
         startTime: availableStart,
         endTime: availableEnd,
+        startSequence: optionalFinite(response.coverage?.firstSequence),
+        endSequence: optionalFinite(response.coverage?.lastSequence),
         contiguous: response.coverage?.contiguous !== false && coverageQuality !== "gapped",
         eventCount,
         detail: `Server footprints · ${footprints.length.toLocaleString()} candles · ${eventCount.toLocaleString()} executions${cacheState ? ` · cache ${cacheState}` : ""}`,
