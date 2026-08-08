@@ -5,6 +5,13 @@ import { MARKETS } from "./markets";
 import { loadSnapshot, streamMarket, type ProviderController } from "./providers";
 import { EventRecorder, reduceReplay } from "./recorder";
 import { createStoredSession, defaultSessionStore, type StoredSession, type StoredSessionSummary } from "./sessionStore";
+import {
+  createPublicationDirty,
+  markPublicationDirty,
+  preparePublishedCollections,
+  publishedCollectionsFromState,
+  type PublishedCollections,
+} from "./statePublication";
 import { TelemetryBuffer } from "./telemetry";
 import type {
   Candle,
@@ -31,6 +38,7 @@ const STALE_AFTER_MS = 8_000;
 const STALE_CHECK_MS = 250;
 const UI_FLUSH_MS = 50;
 const ANALYTICS_INTERVAL_MS = 250;
+const FOOTPRINT_QUALITY_REFRESH_MS = 1_000;
 const AUTOSAVE_MS = 30_000;
 const AUTOSAVE_IDLE_TIMEOUT_MS = 2_500;
 const MAX_LIVE_TRADES = 25_000;
@@ -177,6 +185,9 @@ export function useMarketEngine(): EngineApi {
   const lastSequenceRef = useRef<number | undefined>(undefined);
   const lastFlushAtRef = useRef(0);
   const lastAnalyticsAtRef = useRef(0);
+  const lastFootprintSnapshotAtRef = useRef(0);
+  const publicationDirtyRef = useRef(createPublicationDirty(true));
+  const publishedCollectionsRef = useRef<PublishedCollections>(publishedCollectionsFromState(liveState));
   const autosaveInFlightRef = useRef(false);
   const lastAutosavedCountRef = useRef(0);
 
@@ -191,24 +202,27 @@ export function useMarketEngine(): EngineApi {
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
       const model = modelRef.current;
-      const footprint = footprintRef.current.snapshot();
-      model.footprints = footprint.footprints;
-      model.footprintCoverage = footprint.coverage;
       const now = performance.now();
+      const dirty = publicationDirtyRef.current;
+
+      if (dirty.footprints || now - lastFootprintSnapshotAtRef.current >= FOOTPRINT_QUALITY_REFRESH_MS) {
+        const footprint = footprintRef.current.snapshot();
+        model.footprints = footprint.footprints;
+        model.footprintCoverage = footprint.coverage;
+        markPublicationDirty(dirty, { footprints: true });
+        lastFootprintSnapshotAtRef.current = now;
+      }
       if (now - lastAnalyticsAtRef.current >= ANALYTICS_INTERVAL_MS) {
         model.analytics = calculateAnalytics(model.candles, model.trades, model.book, model.market.quality);
         lastAnalyticsAtRef.current = now;
       }
       model.eventRate = rateRef.current;
       lastFlushAtRef.current = now;
-      setLiveState({
-        ...model,
-        candles: model.candles.slice(),
-        trades: model.trades.slice(),
-        footprints: model.footprints.slice(),
-        footprintCoverage: { ...model.footprintCoverage },
-        analytics: { ...model.analytics },
-      });
+
+      const collections = preparePublishedCollections(publishedCollectionsRef.current, model, dirty);
+      publishedCollectionsRef.current = collections;
+      publicationDirtyRef.current = createPublicationDirty(false);
+      setLiveState({ ...model, ...collections });
     }, delay);
   }, []);
 
@@ -243,9 +257,17 @@ export function useMarketEngine(): EngineApi {
     const abort = new AbortController();
     const market = MARKETS[marketKey];
     const next = initialState(marketKey, timeframe);
+    const initialCollections = preparePublishedCollections(
+      publishedCollectionsFromState(next),
+      next,
+      createPublicationDirty(true),
+    );
     captureStartedAtRef.current = Date.now();
     modelRef.current = next;
-    setLiveState(next);
+    publishedCollectionsRef.current = initialCollections;
+    publicationDirtyRef.current = createPublicationDirty(true);
+    lastFootprintSnapshotAtRef.current = 0;
+    setLiveState({ ...next, ...initialCollections });
     footprintRef.current = new FootprintAccumulator(market, timeframe);
     recorderRef.current.reset(marketKey);
     tradeIdsRef.current.clear();
@@ -288,6 +310,7 @@ export function useMarketEngine(): EngineApi {
       const model = modelRef.current;
       model.candles = mergeCandles(snapshot.candles, model.candles);
       model.trades = mergeTrades(snapshot.trades, model.trades);
+      markPublicationDirty(publicationDirtyRef.current, { candles: true, trades: true, footprints: true });
       tradeIdsRef.current = new Set(model.trades.map((trade) => trade.id));
       lastSequenceRef.current = latestSequence(model.trades);
       model.book = snapshot.book ?? model.book;
@@ -322,6 +345,7 @@ export function useMarketEngine(): EngineApi {
         const model = modelRef.current;
         model.candles = mergeCandle(model.candles, candle);
         footprintRef.current.upsertCandle(candle);
+        markPublicationDirty(publicationDirtyRef.current, { candles: true, footprints: true });
         touch(candle.endTime);
         record({ id: eventId("candle", candle.time), type: "candle", market: marketKey, exchangeTime: candle.endTime, receiveTime: Date.now(), payload: candle });
         flush();
@@ -329,6 +353,7 @@ export function useMarketEngine(): EngineApi {
       onTrade: (trade: Trade) => {
         const model = modelRef.current;
         if (!appendLiveTrade(model.trades, tradeIdsRef.current, trade)) return;
+        markPublicationDirty(publicationDirtyRef.current, { trades: true, footprints: true });
         if (market.provider === "Binance" && trade.sequence !== undefined) {
           const previous = lastSequenceRef.current;
           if (previous !== undefined && trade.sequence > previous + 1) {
@@ -345,6 +370,7 @@ export function useMarketEngine(): EngineApi {
       },
       onTradeGap: (exchangeTime, detail) => {
         footprintRef.current.markGap(exchangeTime, detail);
+        markPublicationDirty(publicationDirtyRef.current, { footprints: true });
         const model = modelRef.current;
         const receiveTime = Date.now();
         model.statusDetail = detail;
