@@ -120,6 +120,24 @@ function finalizeRows(rows, tickSize, imbalanceRatio, minVolume, valueAreaRatio)
   return { rows: output, area };
 }
 
+export function unfinishedAuctionState(rows, quality) {
+  const normalizedQuality = canonicalQuality(quality);
+  if ((normalizedQuality !== "FULL" && normalizedQuality !== "REPLAY FULL") || !rows.length) {
+    return { unfinishedHigh: undefined, unfinishedLow: undefined, unfinishedHighPrice: undefined, unfinishedLowPrice: undefined };
+  }
+  const descending = [...rows].sort((left, right) => right.price - left.price);
+  const high = descending[0];
+  const low = descending.at(-1);
+  const unfinishedHigh = high.bidVolume > 0 && high.askVolume > 0;
+  const unfinishedLow = low.bidVolume > 0 && low.askVolume > 0;
+  return {
+    unfinishedHigh,
+    unfinishedLow,
+    unfinishedHighPrice: unfinishedHigh ? high.price : undefined,
+    unfinishedLowPrice: unfinishedLow ? low.price : undefined,
+  };
+}
+
 function validRangeValue(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const parsed = Number(value);
@@ -205,6 +223,7 @@ export function buildFootprints(events, timeframe = "1m", tickSize = 0.01, optio
       if (!poc || row.totalVolume > poc.totalVolume) poc = row;
     }
 
+    const quality = canonicalQuality(candle.quality);
     const footprint = {
       time: candle.time,
       endTime: candle.endTime,
@@ -222,7 +241,8 @@ export function buildFootprints(events, timeframe = "1m", tickSize = 0.01, optio
       valueAreaHigh: finalized.area.high,
       valueAreaLow: finalized.area.low,
       eventCount: candle.eventCount,
-      quality: canonicalQuality(candle.quality),
+      ...unfinishedAuctionState(rows, quality),
+      quality,
       priceStep: step,
     };
     return { ...footprint, hash: sha256(footprint) };
