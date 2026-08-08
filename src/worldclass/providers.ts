@@ -1,3 +1,4 @@
+import { collectorConfigured, loadCollectorFootprints } from "./collectorClient";
 import { MARKETS, timeframeMs } from "./markets";
 import { BinanceLocalBook, normalizeBook, type BinanceDepthSnapshot, type BinanceDepthUpdate } from "./orderBook";
 import type {
@@ -5,6 +6,7 @@ import type {
   BookLevel,
   Candle,
   ConnectionState,
+  FootprintCandle,
   MarketDefinition,
   MarketMetrics,
   OrderBook,
@@ -17,6 +19,7 @@ export interface Snapshot {
   candles: Candle[];
   trades: Trade[];
   tradeCoverage: TradeCoverageInput;
+  footprints?: FootprintCandle[];
   book: OrderBook | null;
   metrics: MarketMetrics;
 }
@@ -233,14 +236,16 @@ async function loadBinance(market: MarketDefinition, timeframe: Timeframe, signa
     loadBinanceMetrics(market, signal),
   ]);
   const candles = rows.map(binanceKline);
-  const backfill = await loadRecentAggTrades(market, candles, timeframe, signal);
+  const serverFootprints = collectorConfigured() ? await loadCollectorFootprints(market, timeframe, candles, signal) : undefined;
+  const backfill = serverFootprints ? undefined : await loadRecentAggTrades(market, candles, timeframe, signal);
   const local = new BinanceLocalBook();
   local.reset();
   local.applySnapshot(depth);
   return {
     candles,
-    trades: backfill.trades,
-    tradeCoverage: backfill.coverage,
+    trades: backfill?.trades ?? [],
+    tradeCoverage: serverFootprints?.coverage ?? backfill?.coverage ?? { source: "none", contiguous: true, eventCount: 0, detail: "No execution history available" },
+    footprints: serverFootprints?.footprints,
     book: local.snapshot(Date.now()),
     metrics,
   };
